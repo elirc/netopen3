@@ -1,0 +1,366 @@
+// Copyright (c) Umbraco.
+// See LICENSE for more details.
+
+using System.Collections.Concurrent;
+using System.Linq;
+using System.Threading;
+using Microsoft.Data.SqlClient;
+using NUnit.Framework;
+using Umbraco.Cms.Core.Security;
+using Umbraco.Cms.Core.Services;
+using Umbraco.Cms.Infrastructure.Persistence.Dtos;
+using Umbraco.Cms.Tests.Common.Attributes;
+using Umbraco.Cms.Tests.Common.Builders;
+using Umbraco.Cms.Tests.Common.Testing;
+using Umbraco.Cms.Tests.Integration.Testing;
+using static Umbraco.Cms.Tests.Integration.Testing.BaseTestDatabase;
+
+namespace Umbraco.Cms.Tests.Integration.Umbraco.Infrastructure.Services;
+
+[TestFixture]
+[UmbracoTest(Database = UmbracoTestOptions.Database.NewSchemaPerTest)]
+internal sealed class ExternalLoginServiceTests : UmbracoIntegrationTest
+{
+    private IUserService UserService => GetRequiredService<IUserService>();
+
+    private IExternalLoginWithKeyService ExternalLoginService => GetRequiredService<IExternalLoginWithKeyService>();
+
+    [Test]
+    [Ignore(
+        "We don't support duplicates anymore, this removing on save was a breaking change work around, this needs to be ported to a migration")]
+    public void Removes_Existing_Duplicates_On_Save()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        var providerKey = Guid.NewGuid().ToString("N");
+        var latest = DateTime.UtcNow.AddDays(-1);
+        var oldest = DateTime.UtcNow.AddDays(-10);
+
+        using (var scope = ScopeProvider.CreateScope())
+        {
+            // insert duplicates manuall
+            ScopeAccessor.AmbientScope.Database.Insert(new ExternalLoginDto
+            {
+                UserOrMemberKey = user.Key,
+                LoginProvider = "test1",
+                ProviderKey = providerKey,
+                CreateDate = latest
+            });
+            ScopeAccessor.AmbientScope.Database.Insert(new ExternalLoginDto
+            {
+                UserOrMemberKey = user.Key,
+                LoginProvider = "test1",
+                ProviderKey = providerKey,
+                CreateDate = oldest
+            });
+        }
+
+        // try to save 2 other duplicates
+        ExternalLogin[] externalLogins =
+        {
+            new ExternalLogin("test2", providerKey), new ExternalLogin("test2", providerKey),
+            new ExternalLogin("test1", providerKey)
+        };
+
+        ExternalLoginService.Save(user.Key, externalLogins);
+
+        var logins = ExternalLoginService.GetExternalLogins(user.Key).ToList();
+
+        // duplicates will be removed, keeping the latest entries
+        Assert.AreEqual(2, logins.Count);
+
+        var test1 = logins.Single(x => x.LoginProvider == "test1");
+        Assert.Greater(test1.CreateDate, latest);
+    }
+
+    [Test]
+    public void Does_Not_Persist_Duplicates()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        var providerKey = Guid.NewGuid().ToString("N");
+        ExternalLogin[] externalLogins =
+        {
+            new ExternalLogin("test1", providerKey), new ExternalLogin("test1", providerKey)
+        };
+
+        ExternalLoginService.Save(user.Key, externalLogins);
+
+        var logins = ExternalLoginService.GetExternalLogins(user.Key).ToList();
+        Assert.AreEqual(1, logins.Count);
+    }
+
+    [Test]
+    public void Multiple_Update()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        var providerKey1 = Guid.NewGuid().ToString("N");
+        var providerKey2 = Guid.NewGuid().ToString("N");
+        ExternalLogin[] extLogins =
+        {
+            new ExternalLogin("test1", providerKey1, "hello"), new ExternalLogin("test2", providerKey2, "world")
+        };
+        ExternalLoginService.Save(user.Key, extLogins);
+
+        extLogins = new[]
+        {
+            new ExternalLogin("test1", providerKey1, "123456"), new ExternalLogin("test2", providerKey2, "987654")
+        };
+        ExternalLoginService.Save(user.Key, extLogins);
+
+        var found = ExternalLoginService.GetExternalLogins(user.Key).OrderBy(x => x.LoginProvider).ToList();
+        Assert.AreEqual(2, found.Count);
+        Assert.AreEqual("123456", found[0].UserData);
+        Assert.AreEqual("987654", found[1].UserData);
+    }
+
+    [Test]
+    public void Can_Find_As_Extended_Type()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        var providerKey1 = Guid.NewGuid().ToString("N");
+        var providerKey2 = Guid.NewGuid().ToString("N");
+        ExternalLogin[] extLogins =
+        {
+            new ExternalLogin("test1", providerKey1, "hello"), new ExternalLogin("test2", providerKey2, "world")
+        };
+        ExternalLoginService.Save(user.Key, extLogins);
+
+        var found = ExternalLoginService.Find("test2", providerKey2).ToList();
+        Assert.AreEqual(1, found.Count);
+        var asExtended = found.ToList();
+        Assert.AreEqual(1, found.Count);
+    }
+
+    [Test]
+    public void Add_Logins()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        ExternalLogin[] externalLogins =
+        {
+            new ExternalLogin("test1", Guid.NewGuid().ToString("N")),
+            new ExternalLogin("test2", Guid.NewGuid().ToString("N"))
+        };
+
+        ExternalLoginService.Save(user.Key, externalLogins);
+
+        var logins = ExternalLoginService.GetExternalLogins(user.Key).OrderBy(x => x.LoginProvider).ToList();
+        Assert.AreEqual(2, logins.Count);
+        for (var i = 0; i < logins.Count; i++)
+        {
+            Assert.AreEqual(logins[i].ProviderKey, externalLogins[i].ProviderKey);
+            Assert.AreEqual(logins[i].LoginProvider, externalLogins[i].LoginProvider);
+        }
+    }
+
+    [Test]
+    public void Add_Tokens()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        ExternalLogin[] externalLogins = { new ExternalLogin("test1", Guid.NewGuid().ToString("N")) };
+
+        ExternalLoginService.Save(user.Key, externalLogins);
+
+        ExternalLoginToken[] externalTokens =
+        {
+            new ExternalLoginToken(externalLogins[0].LoginProvider, "hello1", "world1"),
+            new ExternalLoginToken(externalLogins[0].LoginProvider, "hello2", "world2")
+        };
+
+        ExternalLoginService.Save(user.Key, externalTokens);
+
+        var tokens = ExternalLoginService.GetExternalLoginTokens(user.Key).ToList();
+        Assert.AreEqual(2, tokens.Count);
+    }
+
+    [Test]
+    public void Add_Update_Delete_Logins()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        ExternalLogin[] externalLogins =
+        {
+            new ExternalLogin("test1", Guid.NewGuid().ToString("N")),
+            new ExternalLogin("test2", Guid.NewGuid().ToString("N")),
+            new ExternalLogin("test3", Guid.NewGuid().ToString("N")),
+            new ExternalLogin("test4", Guid.NewGuid().ToString("N"))
+        };
+
+        ExternalLoginService.Save(user.Key, externalLogins);
+
+        var logins = ExternalLoginService.GetExternalLogins(user.Key).OrderBy(x => x.LoginProvider).ToList();
+
+        logins.RemoveAt(0); // remove the first one
+        logins.Add(new IdentityUserLogin("test5", Guid.NewGuid().ToString("N"), user.Id.ToString())); // add a new one
+        logins[0].ProviderKey = "abcd123"; // update
+
+        // save new list
+        ExternalLoginService.Save(user.Key, logins.Select(x => new ExternalLogin(x.LoginProvider, x.ProviderKey)));
+
+        var updatedLogins = ExternalLoginService.GetExternalLogins(user.Key).OrderBy(x => x.LoginProvider).ToList();
+        Assert.AreEqual(4, updatedLogins.Count);
+        for (var i = 0; i < updatedLogins.Count; i++)
+        {
+            Assert.AreEqual(logins[i].LoginProvider, updatedLogins[i].LoginProvider);
+            Assert.AreEqual(logins[i].ProviderKey, updatedLogins[i].ProviderKey);
+        }
+    }
+
+    [Test]
+    public void Add_Update_Delete_Tokens()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        ExternalLogin[] externalLogins =
+        {
+            new ExternalLogin("test1", Guid.NewGuid().ToString("N")),
+            new ExternalLogin("test2", Guid.NewGuid().ToString("N"))
+        };
+
+        ExternalLoginService.Save(user.Key, externalLogins);
+
+        ExternalLoginToken[] externalTokens =
+        {
+            new ExternalLoginToken(externalLogins[0].LoginProvider, "hello1", "world1"),
+            new ExternalLoginToken(externalLogins[0].LoginProvider, "hello1a", "world1a"),
+            new ExternalLoginToken(externalLogins[1].LoginProvider, "hello2", "world2"),
+            new ExternalLoginToken(externalLogins[1].LoginProvider, "hello2a", "world2a")
+        };
+
+        ExternalLoginService.Save(user.Key, externalTokens);
+
+        var tokens = ExternalLoginService.GetExternalLoginTokens(user.Key).OrderBy(x => x.LoginProvider).ToList();
+
+        tokens.RemoveAt(0); // remove the first one
+        tokens.Add(new IdentityUserToken(
+            externalLogins[1].LoginProvider,
+            "hello2b",
+            "world2b",
+            user.Id.ToString())); // add a new one
+        tokens[0].Value = "abcd123"; // update
+
+        // save new list
+        ExternalLoginService.Save(user.Key,
+            tokens.Select(x => new ExternalLoginToken(x.LoginProvider, x.Name, x.Value)));
+
+        var updatedTokens = ExternalLoginService.GetExternalLoginTokens(user.Key).OrderBy(x => x.LoginProvider)
+            .ToList();
+        Assert.AreEqual(4, updatedTokens.Count);
+        for (var i = 0; i < updatedTokens.Count; i++)
+        {
+            Assert.AreEqual(tokens[i].LoginProvider, updatedTokens[i].LoginProvider);
+            Assert.AreEqual(tokens[i].Name, updatedTokens[i].Name);
+            Assert.AreEqual(tokens[i].Value, updatedTokens[i].Value);
+        }
+    }
+
+    [Test]
+    public void Add_Retrieve_User_Data()
+    {
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        ExternalLogin[] externalLogins = { new ExternalLogin("test1", Guid.NewGuid().ToString("N"), "hello world") };
+
+        ExternalLoginService.Save(user.Key, externalLogins);
+
+        var logins = ExternalLoginService.GetExternalLogins(user.Key).ToList();
+
+        Assert.AreEqual("hello world", logins[0].UserData);
+    }
+
+    [Test]
+    [LongRunning]
+    public async Task Concurrent_Save_Same_Login_Should_Not_Throw_Duplicate_Key_Exception()
+    {
+        if (IsSqlite())
+        {
+            Assert.Ignore("This concurrency test requires SQL Server to reliably reproduce the race condition.");
+            return;
+        }
+
+        // Arrange
+        var user = new UserBuilder().Build();
+        UserService.Save(user);
+
+        const int NumberOfConcurrentOperations = 10;
+        var unexpectedExceptions = new ConcurrentBag<Exception>();
+        var providerKey = Guid.NewGuid().ToString("N");
+
+        // Barrier ensures all threads start the Save operation at the same time,
+        // maximizing the chance of triggering the race condition where multiple
+        // concurrent requests try to insert the same login record.
+        using var barrier = new Barrier(NumberOfConcurrentOperations);
+
+        var tasks = new List<Task>();
+        for (var i = 0; i < NumberOfConcurrentOperations; i++)
+        {
+            // Must suppress execution context flow so each task gets its own scope context.
+            // Otherwise all tasks share the same ambient scope which isn't thread-safe.
+            using (ExecutionContext.SuppressFlow())
+            {
+                tasks.Add(Task.Run(() =>
+                {
+                    barrier.SignalAndWait();
+                    try
+                    {
+                        var login = new ExternalLogin("TestProvider", providerKey);
+                        ExternalLoginService.Save(user.Key, [login]);
+                    }
+                    catch (Exception ex) when (IsDeadlockException(ex))
+                    {
+                        // Deadlock victim (SQL Server error 1205) — tolerated.
+                        // The 10-way Barrier is intentionally more aggressive than any realistic
+                        // production scenario, and SQL Server's UPDLOCK hint does not prevent phantom
+                        // inserts under READ COMMITTED. This test is about the duplicate-key race
+                        // handler, not deadlock resilience, so we swallow deadlocks here — the final
+                        // assertion still confirms at least one save succeeded.
+                    }
+                    catch (Exception ex)
+                    {
+                        unexpectedExceptions.Add(ex);
+                    }
+                }));
+            }
+        }
+
+        // Act
+        await Task.WhenAll(tasks);
+
+        // Assert
+        var exceptionDetails = unexpectedExceptions.Select(e =>
+            $"Type: {e.GetType().FullName}, Message: {e.Message}, Inner: {e.InnerException?.GetType().FullName}: {e.InnerException?.Message}");
+        Assert.IsEmpty(
+            unexpectedExceptions,
+            $"Expected no duplicate key exceptions but got {unexpectedExceptions.Count}:\n{string.Join("\n", exceptionDetails)}");
+
+        var logins = ExternalLoginService.GetExternalLogins(user.Key).ToList();
+        Assert.AreEqual(1, logins.Count, "Should have exactly one login");
+    }
+
+    private static bool IsDeadlockException(Exception ex)
+    {
+        const int DeadlockVictimErrorNumber = 1205;
+        for (Exception? current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlException && sqlException.Number == DeadlockVictimErrorNumber)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}

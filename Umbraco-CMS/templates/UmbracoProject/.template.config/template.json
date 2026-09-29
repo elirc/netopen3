@@ -1,0 +1,467 @@
+{
+  "$schema": "https://json.schemastore.org/template.json",
+  "author": "Umbraco HQ",
+  "classifications": [
+    "Web",
+    "CMS",
+    "Umbraco"
+  ],
+  "name": "Umbraco Project",
+  "description": "An empty Umbraco project ready to get started.",
+  "groupIdentity": "Umbraco.Templates.UmbracoProject",
+  "identity": "Umbraco.Templates.UmbracoProject.CSharp",
+  "shortName": "umbraco",
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "sourceName": "UmbracoProject",
+  "defaultName": "UmbracoProject1",
+  "preferNameDirectory": true,
+  "additionalConfigFiles": [ "starterkits.template.json"],
+  "sources": [
+    {
+      "modifiers": [
+        {
+          "condition": "(ExcludeGitignore)",
+          "exclude": [
+            ".gitignore"
+          ]
+        },
+        {
+          "condition": "(!Docker)",
+          "exclude": [
+            "Dockerfile",
+            ".dockerignore",
+            "entrypoint.sh"
+          ]
+        },
+        {
+          "condition": "(!UseCPM)",
+          "exclude": [
+            "Directory.Packages.props"
+          ]
+        }
+      ]
+    }
+  ],
+  "symbols": {
+    "UmbracoRelease": {
+      "displayName": "Umbraco Version",
+      "description": "The Umbraco release to use, either latest or latest long term supported",
+      "type": "parameter",
+      "datatype": "choice",
+      "defaultValue": "Latest",
+      "choices": [
+        {
+          "choice": "Latest",
+          "description": "The latest umbraco release"
+        },
+        {
+          "choice": "LTS",
+          "description": "The most recent long term supported version",
+          "displayName": "Long Term Supported"
+        }
+      ],
+      "isRequired": false
+    },
+    "FinalVersion": {
+      "type": "generated",
+      "generator": "switch",
+      "datatype": "text",
+      "description": "The calculated version of Umbraco to use",
+      "replaces": "UMBRACO_VERSION_FROM_TEMPLATE",
+      "parameters": {
+        "evaluator": "C++",
+        "datatype": "text",
+        "cases": [
+          {
+            "condition": "(UmbracoRelease == 'Latest')",
+            "value": "*"
+          },
+          {
+            "condition": "(UmbracoRelease == 'LTS')",
+            "value": "17.*"
+          }
+        ]
+      }
+    },
+    "PackageManagement": {
+      "type": "parameter",
+      "datatype": "choice",
+      "defaultValue": "Central",
+      "displayName": "Package Version Management",
+      "description": "Choose how to manage NuGet package versions",
+      "choices": [
+        {
+          "choice": "Central",
+          "displayName": "Central package management",
+          "description": "Use Directory.Packages.props (recommended for new standalone projects)"
+        },
+        {
+          "choice": "PerProject",
+          "displayName": "Per project",
+          "description": "Use versions in .csproj (recommended when adding to existing projects)"
+        }
+      ]
+    },
+    "UseCPM": {
+      "type": "computed",
+      "value": "(PackageManagement == \"Central\")"
+    },
+    "DotnetVersion": {
+      "type": "generated",
+      "generator": "switch",
+      "datatype": "text",
+      "description": "Used to calculate the dotnet version to use, for latest we want to use dotnet 10 and for LTS we want to use dotnet 10",
+      "replaces": "DOTNET_VERSION_FROM_TEMPLATE",
+      "parameters": {
+        "evaluator": "C++",
+        "datatype": "text",
+        "cases": [
+          {
+            "condition": "(UmbracoRelease == 'Latest')",
+            "value": "net10.0"
+          },
+          {
+            "condition": "(UmbracoRelease == 'LTS')",
+            "value": "net10.0"
+          }
+        ]
+      }
+    },
+    "UseHttpsRedirect": {
+      "displayName": "Use HTTPS redirect",
+      "description": "Adds code to Startup.cs to redirect HTTP to HTTPS and enables the UseHttps setting.",
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false"
+    },
+    "UseDeliveryApi": {
+      "displayName": "Use Delivery API",
+      "description": "Enables the Delivery API",
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false"
+    },
+    "Docker": {
+      "displayName": "Add Docker file",
+      "description": "Adds a docker file to the project.",
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false"
+    },
+    "SkipRestore": {
+      "displayName": "Skip restore",
+      "description": "If specified, skips the automatic restore of the project on create.",
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false"
+    },
+    "ExcludeGitignore": {
+      "displayName": "Exclude .gitignore",
+      "description": "Whether to exclude .gitignore from the generated template.",
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false"
+    },
+    "MinimalGitignore": {
+      "displayName": "Minimal .gitignore",
+      "description": "Whether to only include minimal (Umbraco specific) rules in the .gitignore.",
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false"
+    },
+    "ConnectionString": {
+      "displayName": "Connection string",
+      "description": "Database connection string used by Umbraco.",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "",
+      "forms": {
+        "global": [
+          "jsonEncode"
+        ]
+      },
+      "replaces": "CONNECTION_STRING_FROM_TEMPLATE"
+    },
+    "ConnectionStringProviderName": {
+      "displayName": "Connection string provider name",
+      "description": "Database connection string provider name used by Umbraco.",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "Microsoft.Data.SqlClient",
+      "forms": {
+        "global": [
+          "jsonEncode"
+        ]
+      },
+      "replaces": "CONNECTION_STRING_PROVIDER_NAME_FROM_TEMPLATE"
+    },
+    "HasConnectionString": {
+      "type": "computed",
+      "value": "(ConnectionString != '')"
+    },
+    "DevelopmentDatabaseType": {
+      "displayName": "Development database type",
+      "description": "Database type used by Umbraco for development.",
+      "type": "parameter",
+      "datatype": "choice",
+      "choices": [
+        {
+          "displayName": "None",
+          "description": "Do not configure a database for development.",
+          "choice": "None"
+        },
+        {
+          "displayName": "SQLite",
+          "description": "Use embedded SQLite database.",
+          "choice": "SQLite"
+        },
+        {
+          "displayName": "SQL Server Express LocalDB",
+          "description": "Use embedded LocalDB database (requires SQL Server Express with Advanced Services).",
+          "choice": "LocalDB"
+        }
+      ],
+      "defaultValue": "None"
+    },
+    "DevelopmentConnectionString": {
+      "type": "generated",
+      "datatype": "string",
+      "generator": "switch",
+      "parameters": {
+        "cases": [
+          {
+            "condition": "(DevelopmentDatabaseType == 'SQLite')",
+            "value": "Data Source=|DataDirectory|/Umbraco.sqlite.db;Cache=Shared;Foreign Keys=True;Pooling=True"
+          },
+          {
+            "condition": "(DevelopmentDatabaseType == 'LocalDB')",
+            "value": "Data Source=(localdb)\\\\MSSQLLocalDB;AttachDbFilename=|DataDirectory|\\\\Umbraco.mdf;Integrated Security=True"
+          }
+        ]
+      },
+      "replaces": "CONNECTION_STRING_DEVELOPMENT_FROM_TEMPLATE"
+    },
+    "DevelopmentConnectionStringProviderName": {
+      "type": "generated",
+      "datatype": "string",
+      "generator": "switch",
+      "parameters": {
+        "cases": [
+          {
+            "condition": "(DevelopmentDatabaseType == 'SQLite')",
+            "value": "Microsoft.Data.Sqlite"
+          },
+          {
+            "condition": "(true)",
+            "value": "Microsoft.Data.SqlClient"
+          }
+        ]
+      },
+      "replaces": "CONNECTION_STRING_PROVIDER_NAME_DEVELOPMENT_FROM_TEMPLATE"
+    },
+    "HasDevelopmentConnectionString": {
+      "type": "computed",
+      "value": "(DevelopmentConnectionString != '')"
+    },
+    "UnattendedUserName": {
+      "displayName": "Unattended user name",
+      "description": "Used to specify the name of the default admin user when using unattended install on development (stored as plain text).",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "",
+      "forms": {
+        "global": [
+          "jsonEncode"
+        ]
+      },
+      "replaces": "UNATTENDED_USER_NAME_FROM_TEMPLATE"
+    },
+    "UnattendedUserEmail": {
+      "displayName": "Unattended user email",
+      "description": "Used to specify the email of the default admin user when using unattended install on development (stored as plain text).",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "",
+      "forms": {
+        "global": [
+          "jsonEncode"
+        ]
+      },
+      "replaces": "UNATTENDED_USER_EMAIL_FROM_TEMPLATE"
+    },
+    "UnattendedUserPassword": {
+      "displayName": "Unattended user password",
+      "description": "Used to specify the password of the default admin user when using unattended install on development (stored as plain text).",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "",
+      "forms": {
+        "global": [
+          "jsonEncode"
+        ]
+      },
+      "replaces": "UNATTENDED_USER_PASSWORD_FROM_TEMPLATE"
+    },
+    "UnattendedTelemetryLevel": {
+      "displayName": "Unattended telemetry level",
+      "description": "Specifies the level of telemetry information the installation will report.",
+      "type": "parameter",
+      "datatype": "choice",
+      "defaultValue": "Detailed",
+      "choices": [
+        {
+          "choice": "Minimal",
+          "description": "Minimal information"
+        },
+        {
+          "choice": "Basic",
+          "description": "Basic information"
+        },
+        {
+          "choice": "Detailed",
+          "description": "Detailed information"
+        }
+      ],
+      "forms": {
+        "global": [
+          "jsonEncode"
+        ]
+      },
+      "replaces": "UNATTENDED_TELEMETRY_LEVEL_FROM_TEMPLATE"
+    },
+    "UsingUnattenedInstall": {
+      "type": "computed",
+      "value": "(UnattendedUserName != '' && UnattendedUserEmail != '' && UnattendedUserPassword != '' && (HasConnectionString || HasDevelopmentConnectionString))"
+    },
+    "NoNodesViewPath": {
+      "displayName": "No nodes view path",
+      "description": "Path to a custom view presented with the Umbraco installation contains no published content.",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "",
+      "forms": {
+        "global": [
+          "jsonEncode"
+        ]
+      },
+      "replaces": "NO_NODES_VIEW_PATH_FROM_TEMPLATE"
+    },
+    "HasNoNodesViewPath": {
+      "type": "computed",
+      "value": "(NoNodesViewPath != '')"
+    },
+    "PackageProjectName": {
+      "displayName": "Umbraco package project name",
+      "description": "The name of the package project this should be a test site for.",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "",
+      "replaces": "PACKAGE_PROJECT_NAME_FROM_TEMPLATE"
+    },
+    "DevelopmentMode": {
+      "type": "parameter",
+      "displayName": "Development mode",
+      "datatype": "choice",
+      "description": "Choose the development mode to use for the project.",
+      "defaultValue": "BackofficeDevelopment",
+      "choices": [
+        {
+          "choice": "BackofficeDevelopment",
+          "description": "Enables backoffice development, allowing you to develop from within the backoffice, this is the default behaviour.",
+          "displayName": "Backoffice Development"
+        },
+        {
+          "choice": "IDEDevelopment",
+          "description": "Configures appsettings.Development.json to Development runtime mode and SourceCodeAuto models builder mode, and configures appsettings.json to Production runtime mode, Nothing models builder mode, and enables UseHttps",
+          "displayName": "IDE Development"
+        }
+      ]
+    },
+    "ModelsBuilderMode": {
+      "type": "parameter",
+      "displayName": "Models builder mode",
+      "datatype": "choice",
+      "description": "Choose the models builder mode to use for the project. When development mode is set to IDEDevelopment this only changes the models builder mode appsetttings.development.json",
+      "defaultValue": "Default",
+      "replaces": "MODELS_MODE",
+      "choices": [
+        {
+          "choice": "Default",
+          "description": "Let DevelopmentMode determine the models builder mode."
+        },
+        {
+          "choice": "InMemoryAuto",
+          "description": "Generate models in memory, automatically updating when a content type change, this means no need for app rebuild, however models are only available in views.",
+          "displayName": "In Memory Auto"
+        },
+        {
+          "choice": "SourceCodeManual",
+          "description": "Generate models as source code, only updating when requested manually, this means a interaction and rebuild is required when content type(s) change, however models are available in code.",
+          "displayName": "Source Code Manual"
+        },
+        {
+          "choice": "SourceCodeAuto",
+          "description": "Generate models as source code, automatically updating when a content type change, this means a rebuild is required when content type(s) change, however models are available in code.",
+          "displayName": "Source Code Auto"
+        },
+        {
+          "choice": "Nothing",
+          "description": "No models are generated, this is recommended for production assuming generated models are used for development."
+        }
+      ]
+    },
+    "Namespace": {
+      "type": "derived",
+      "valueSource": "name",
+      "valueTransform": "safe_namespace",
+      "replaces": "Umbraco.Cms.Web.UI"
+    },
+    "HttpPort": {
+      "type": "generated",
+      "generator": "port",
+      "parameters": {
+        "fallback": 5000
+      },
+      "replaces": "HTTP_PORT_FROM_TEMPLATE"
+    },
+    "HttpsPort": {
+      "type": "generated",
+      "generator": "port",
+      "parameters": {
+        "low": 44300,
+        "high": 44399,
+        "fallback": 5001
+      },
+      "replaces": "HTTPS_PORT_FROM_TEMPLATE"
+    },
+    "TelemetryId": {
+      "type": "generated",
+      "generator": "guid",
+      "parameters": {
+        "defaultFormat": "d"
+      },
+      "replaces": "TELEMETRYID_FROM_TEMPLATE"
+    }
+  },
+  "primaryOutputs": [
+    {
+      "path": "UmbracoProject.csproj"
+    }
+  ],
+  "postActions": [
+    {
+      "condition": "(!SkipRestore)",
+      "description": "Restore NuGet packages required by this project",
+      "manualInstructions": [
+        {
+          "text": "Run 'dotnet restore'"
+        }
+      ],
+      "actionId": "210D431B-A78B-4D2F-B762-4ED3E3EA9025",
+      "continueOnError": true
+    }
+  ]
+}

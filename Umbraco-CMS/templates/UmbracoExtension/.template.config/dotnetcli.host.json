@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/dotnetcli.host.json",
+  "symbolInfo": {
+    "UmbracoVersion": {
+      "longName": "version",
+      "shortName": ""
+    },
+    "SkipRestore": {
+      "longName": "no-restore",
+      "shortName": ""
+    },
+    "SupportPagesAndViews": {
+      "longName": "support-pages-and-views",
+      "shortName": "s"
+    },
+    "IncludeExample": {
+      "longName": "include-example",
+      "shortName": "ex"
+    },
+    "SiteDomain": {
+      "longName": "site-domain",
+      "shortName": "sd"
+    },
+    "PackageManagement": {
+      "longName": "package-management",
+      "shortName": "pm"
+    }
+  }
+}

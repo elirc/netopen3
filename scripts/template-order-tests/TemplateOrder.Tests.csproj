@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Moq" />
+    <PackageReference Include="NUnit" />
+    <PackageReference Include="NUnit3TestAdapter" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Compile the actual upstream regression file, not a copied test implementation. -->
+    <Compile Include="../../Umbraco-CMS/tests/Umbraco.Tests.UnitTests/Umbraco.Cms.Api.Management/Controllers/Template/Item/SearchTemplateItemControllerTests.cs" Link="SearchTemplateItemControllerTests.cs" />
+    <ProjectReference Include="../../Umbraco-CMS/src/Umbraco.Cms.Api.Management/Umbraco.Cms.Api.Management.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,7 @@
+<Project>
+  <Import Project="../../Umbraco-CMS/tests/Directory.Packages.props" />
+  <ItemGroup>
+    <!-- Match upstream pins without adding its global packaging/version tasks to this harness. -->
+    <GlobalPackageReference Remove="@(GlobalPackageReference)" />
+  </ItemGroup>
+</Project>

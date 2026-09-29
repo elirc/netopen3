@@ -1,0 +1,1724 @@
+// Copyright (c) Umbraco.
+// See LICENSE for more details.
+
+using System.Linq;
+using Microsoft.Extensions.DependencyInjection;
+using NUnit.Framework;
+using Umbraco.Cms.Core;
+using Umbraco.Cms.Core.Configuration.Models;
+using Umbraco.Cms.Core.Models;
+using Umbraco.Cms.Core.Services;
+using Umbraco.Cms.Core.Sync;
+using Umbraco.Cms.Infrastructure.Persistence;
+using Umbraco.Cms.Infrastructure.Persistence.Dtos;
+using Umbraco.Cms.Tests.Common.Attributes;
+using Umbraco.Cms.Tests.Common.Builders;
+using Umbraco.Cms.Tests.Common.Testing;
+using Umbraco.Cms.Tests.Integration.Attributes;
+using Umbraco.Cms.Tests.Integration.Testing;
+using Umbraco.Cms.Tests.Integration.Umbraco.Infrastructure.Scoping;
+
+namespace Umbraco.Cms.Tests.Integration.Umbraco.Infrastructure.Services;
+
+[TestFixture]
+[UmbracoTest(Database = UmbracoTestOptions.Database.NewSchemaPerTest, PublishedRepositoryEvents = true)]
+internal sealed class ContentTypeServiceVariantsTests : UmbracoIntegrationTest
+{
+    private ISqlContext SqlContext => GetRequiredService<ISqlContext>();
+
+    private IContentService ContentService => GetRequiredService<IContentService>();
+
+    private IContentTypeService ContentTypeService => GetRequiredService<IContentTypeService>();
+
+    private IRedirectUrlService RedirectUrlService => GetRequiredService<IRedirectUrlService>();
+
+    private ILanguageService LanguageService => GetRequiredService<ILanguageService>();
+
+
+    protected override void CustomTestSetup(IUmbracoBuilder builder)
+    {
+        builder.AddUmbracoHybridCache();
+        builder.Services.AddUnique<IServerMessenger, ScopedRepositoryTests.LocalServerMessenger>();
+        builder.Services.PostConfigure<NuCacheSettings>(options =>
+        {
+            options.NuCacheSerializerType = NuCacheSerializerType.JSON;
+        });
+    }
+
+    public static void ConfigureAllowEditInvariantFromNonDefaultTrue(IUmbracoBuilder builder)
+        => builder.Services.Configure<ContentSettings>(config => config.AllowEditInvariantFromNonDefault = true);
+
+    private void AssertJsonStartsWith(int id, string expected)
+    {
+        var json = GetJson(id).Replace('"', '\'');
+        var pos = json.IndexOf("'cd':", StringComparison.InvariantCultureIgnoreCase);
+        json = json[..(pos + "'cd':".Length)];
+        Assert.AreEqual(expected, json);
+    }
+
+    private string GetJson(int id)
+    {
+        using (var scope = ScopeProvider.CreateScope(autoComplete: true))
+        {
+            var selectJson = SqlContext.Sql().Select<ContentNuDto>().From<ContentNuDto>()
+                .Where<ContentNuDto>(x => x.NodeId == id && !x.Published);
+            var dto = ScopeAccessor.AmbientScope.Database.Fetch<ContentNuDto>(selectJson).FirstOrDefault();
+            Assert.IsNotNull(dto);
+            var json = dto.Data;
+            return json;
+        }
+    }
+
+    [TestCase(ContentVariation.Nothing, ContentVariation.Nothing, false)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.Culture, true)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.CultureAndSegment, true)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.Segment, true)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing, true)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Culture, false)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment, true)]
+    [TestCase(ContentVariation.Culture, ContentVariation.CultureAndSegment, true)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Nothing, true)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Culture, true)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Segment, false)]
+    [TestCase(ContentVariation.Segment, ContentVariation.CultureAndSegment, true)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing, true)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Culture, true)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment, true)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.CultureAndSegment, false)]
+    [LongRunning]
+    public async Task Change_Content_Type_Variation_Clears_Redirects(
+        ContentVariation startingContentTypeVariation,
+        ContentVariation changedContentTypeVariation,
+        bool shouldUrlRedirectsBeCleared)
+    {
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+        contentType.Variations = startingContentTypeVariation;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        var contentType2 = ContentTypeBuilder.CreateBasicContentType("test");
+        await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+
+        // create some content of this content type
+        IContent doc = ContentBuilder.CreateBasicContent(contentType);
+        doc.Name = "Hello1";
+        if (startingContentTypeVariation.HasFlag(ContentVariation.Culture))
+        {
+            doc.SetCultureName(doc.Name, "en-US");
+        }
+
+        ContentService.Save(doc);
+
+        IContent doc2 = ContentBuilder.CreateBasicContent(contentType2);
+        ContentService.Save(doc2);
+
+        RedirectUrlService.RegisterWithStatus("hello/world", doc.Key);
+        RedirectUrlService.RegisterWithStatus("hello2/world2", doc2.Key);
+
+        // These 2 assertions should probably be moved to a test for the Register() method?
+        Assert.AreEqual(1, RedirectUrlService.GetContentRedirectUrls(doc.Key).Count());
+        Assert.AreEqual(1, RedirectUrlService.GetContentRedirectUrls(doc2.Key).Count());
+
+        // change variation
+        contentType.Variations = changedContentTypeVariation;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        var expectedRedirectUrlCount = shouldUrlRedirectsBeCleared ? 0 : 1;
+        Assert.AreEqual(expectedRedirectUrlCount, RedirectUrlService.GetContentRedirectUrls(doc.Key).Count());
+        Assert.AreEqual(1, RedirectUrlService.GetContentRedirectUrls(doc2.Key).Count());
+    }
+
+    [TestCase(ContentVariation.Nothing, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Segment, ContentVariation.CultureAndSegment)]
+    public async Task Change_Content_Type_From_No_Culture_To_Culture(ContentVariation from, ContentVariation to)
+    {
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+        contentType.Variations = from;
+        var properties = CreatePropertyCollection(("title", from));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // create some content of this content type
+        IContent doc = ContentBuilder.CreateBasicContent(contentType);
+        doc.Name = "Hello1";
+        doc.SetValue("title", "hello world");
+        ContentService.Save(doc);
+
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("Hello1", doc.Name);
+        Assert.AreEqual("hello world", doc.GetValue("title"));
+        Assert.IsTrue(doc.Edited);
+        Assert.IsFalse(doc.IsCultureEdited("en-US"));
+
+        // change the content type to be variant, we will also update the name here to detect the copy changes
+        doc.Name = "Hello2";
+        ContentService.Save(doc);
+        contentType.Variations = to;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("Hello2", doc.GetCultureName("en-US"));
+        Assert.AreEqual("hello world",
+            doc.GetValue("title")); // We are not checking against en-US here because properties will remain invariant
+        Assert.IsTrue(doc.Edited);
+        Assert.IsTrue(doc.IsCultureEdited("en-US"));
+
+        // change back property type to be invariant, we will also update the name here to detect the copy changes
+        doc.SetCultureName("Hello3", "en-US");
+        ContentService.Save(doc);
+        contentType.Variations = from;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("Hello3", doc.Name);
+        Assert.AreEqual("hello world", doc.GetValue("title"));
+        Assert.IsTrue(doc.Edited);
+        Assert.IsFalse(doc.IsCultureEdited("en-US"));
+    }
+
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    public async Task Change_Content_Type_From_Culture_To_No_Culture(ContentVariation startingContentTypeVariation,
+        ContentVariation changeContentTypeVariationTo)
+    {
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+        contentType.Variations = startingContentTypeVariation;
+        var properties = CreatePropertyCollection(("title", startingContentTypeVariation));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // create some content of this content type
+        IContent doc = ContentBuilder.CreateBasicContent(contentType);
+        doc.SetCultureName("Hello1", "en-US");
+        doc.SetValue("title", "hello world", "en-US");
+        ContentService.Save(doc);
+
+        doc = ContentService.GetById(doc.Id); // re-get
+        Assert.AreEqual("Hello1", doc.GetCultureName("en-US"));
+        Assert.AreEqual("hello world", doc.GetValue("title", "en-US"));
+        Assert.IsTrue(doc.Edited);
+        Assert.IsTrue(doc.IsCultureEdited("en-US"));
+
+        // change the content type to be invariant, we will also update the name here to detect the copy changes
+        doc.SetCultureName("Hello2", "en-US");
+        ContentService.Save(doc);
+        contentType.Variations = changeContentTypeVariationTo;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("Hello2", doc.Name);
+        Assert.AreEqual("hello world", doc.GetValue("title"));
+        Assert.IsTrue(doc.Edited);
+        Assert.IsFalse(doc.IsCultureEdited("en-US"));
+
+        // change back property type to be variant, we will also update the name here to detect the copy changes
+        doc.Name = "Hello3";
+        ContentService.Save(doc);
+        contentType.Variations = startingContentTypeVariation;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        // at this stage all property types were switched to invariant so even though the variant value
+        // exists it will not be returned because the property type is invariant,
+        // so this check proves that null will be returned
+        Assert.AreEqual("Hello3", doc.Name);
+        Assert.IsNull(doc.GetValue("title", "en-US"));
+        Assert.IsTrue(doc.Edited);
+        Assert.IsTrue(
+            doc.IsCultureEdited("en-US")); // this is true because the name change is copied to the default language
+
+        // we can now switch the property type to be variant and the value can be returned again
+        contentType.PropertyTypes.First().Variations = startingContentTypeVariation;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("Hello3", doc.GetCultureName("en-US"));
+        Assert.AreEqual("hello world", doc.GetValue("title", "en-US"));
+        Assert.IsTrue(doc.Edited);
+        Assert.IsTrue(doc.IsCultureEdited("en-US"));
+    }
+
+    [TestCase(ContentVariation.Nothing, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.Segment)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.Culture, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Segment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.CultureAndSegment)]
+    public async Task Preserve_Content_Name_After_Content_Type_Variation_Change(ContentVariation contentTypeVariationFrom,
+        ContentVariation contentTypeVariationTo)
+    {
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+        contentType.Variations = contentTypeVariationFrom;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        var invariantContentName = "Content Invariant";
+
+        var defaultCultureContentName = "Content en-US";
+        var defaultCulture = "en-US";
+
+        var nlContentName = "Content nl-NL";
+        var nlCulture = "nl-NL";
+
+        await LanguageService.CreateAsync(new Language(nlCulture, "Dutch (Netherlands)"), Constants.Security.SuperUserKey);
+
+        var includeCultureNames = contentType.Variations.HasFlag(ContentVariation.Culture);
+
+        // Create some content of this content type
+        IContent doc = ContentBuilder.CreateBasicContent(contentType);
+
+        doc.Name = invariantContentName;
+        if (includeCultureNames)
+        {
+            Assert.DoesNotThrow(() => doc.SetCultureName(defaultCultureContentName, defaultCulture));
+            Assert.DoesNotThrow(() => doc.SetCultureName(nlContentName, nlCulture));
+        }
+        else
+        {
+            Assert.Throws<NotSupportedException>(() => doc.SetCultureName(defaultCultureContentName, defaultCulture));
+            Assert.Throws<NotSupportedException>(() => doc.SetCultureName(nlContentName, nlCulture));
+        }
+
+        ContentService.Save(doc);
+        doc = ContentService.GetById(doc.Id);
+
+        AssertAll();
+
+        // Change variation
+        contentType.Variations = contentTypeVariationTo;
+        ContentService.Save(doc);
+        doc = ContentService.GetById(doc.Id);
+
+        AssertAll();
+
+        void AssertAll()
+        {
+            if (includeCultureNames)
+            {
+                // Invariant content name is not preserved when content type is set to culture
+                Assert.AreEqual(defaultCultureContentName, doc.Name);
+                Assert.AreEqual(doc.Name, doc.GetCultureName(defaultCulture));
+                Assert.AreEqual(nlContentName, doc.GetCultureName(nlCulture));
+            }
+            else
+            {
+                Assert.AreEqual(invariantContentName, doc.Name);
+                Assert.AreEqual(null, doc.GetCultureName(defaultCulture));
+                Assert.AreEqual(null, doc.GetCultureName(nlCulture));
+            }
+        }
+    }
+
+    [TestCase(ContentVariation.Nothing, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.Segment)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.Culture, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Segment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.CultureAndSegment)]
+    public async Task Verify_If_Property_Type_Variation_Is_Correctly_Corrected_When_Content_Type_Is_Updated(
+        ContentVariation contentTypeVariation, ContentVariation propertyTypeVariation)
+    {
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+
+        // We test an updated content type so it has to be saved first.
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Update it
+        contentType.Variations = contentTypeVariation;
+        var properties = CreatePropertyCollection(("title", propertyTypeVariation));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Check if property type variations have been updated correctly
+        Assert.AreEqual(properties.First().Variations, contentTypeVariation & propertyTypeVariation);
+    }
+
+    [TestCase(ContentVariation.Nothing, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Segment, ContentVariation.CultureAndSegment)]
+    public async Task Change_Property_Type_From_Invariant_Variant(ContentVariation invariant, ContentVariation variant)
+    {
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+
+        // content type supports all variations
+        contentType.Variations = ContentVariation.Culture | ContentVariation.Segment;
+        var properties = CreatePropertyCollection(("title", invariant));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // create some content of this content type
+        IContent doc = ContentBuilder.CreateBasicContent(contentType);
+        doc.SetCultureName("Home", "en-US");
+        doc.SetValue("title", "hello world");
+        ContentService.Save(doc);
+
+        doc = ContentService.GetById(doc.Id); // re-get
+        Assert.AreEqual("hello world", doc.GetValue("title"));
+        Assert.IsTrue(doc.IsCultureEdited("en-US")); // invariant prop changes show up on default lang
+        Assert.IsTrue(doc.Edited);
+
+        // change the property type to be variant
+        contentType.PropertyTypes.First().Variations = variant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("hello world", doc.GetValue("title", "en-US"));
+        Assert.IsTrue(doc.IsCultureEdited("en-US"));
+        Assert.IsTrue(doc.Edited);
+
+        // change back property type to be invariant
+        contentType.PropertyTypes.First().Variations = invariant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("hello world", doc.GetValue("title"));
+        Assert.IsTrue(doc.IsCultureEdited("en-US")); // invariant prop changes show up on default lang
+        Assert.IsTrue(doc.Edited);
+    }
+
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    public async Task Change_Property_Type_From_Variant_Invariant(ContentVariation variant, ContentVariation invariant)
+    {
+        // create content type with a property type that varies by culture
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+
+        // content type supports all variations
+        contentType.Variations = ContentVariation.Culture | ContentVariation.Segment;
+        var properties = CreatePropertyCollection(("title", variant));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // create some content of this content type
+        IContent doc = ContentBuilder.CreateBasicContent(contentType);
+        doc.SetCultureName("Home", "en-US");
+        doc.SetValue("title", "hello world", "en-US");
+        ContentService.Save(doc);
+
+        Assert.AreEqual("hello world", doc.GetValue("title", "en-US"));
+
+        // change the property type to be invariant
+        contentType.PropertyTypes.First().Variations = invariant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("hello world", doc.GetValue("title"));
+
+        // change back property type to be variant
+        contentType.PropertyTypes.First().Variations = variant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+
+        Assert.AreEqual("hello world", doc.GetValue("title", "en-US"));
+    }
+
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    public async Task Change_Property_Type_From_Variant_Invariant_On_A_Composition(ContentVariation variant,
+        ContentVariation invariant)
+    {
+        // create content type with a property type that varies by culture
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+
+        // content type supports all variations
+        contentType.Variations = ContentVariation.Culture | ContentVariation.Segment;
+        var properties = CreatePropertyCollection(("title", variant));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // compose this from the other one
+        var contentType2 = ContentTypeBuilder.CreateBasicContentType("test");
+        contentType2.Variations = contentType.Variations;
+        contentType2.AddContentType(contentType);
+        await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+
+        // create some content of this content type
+        IContent doc = ContentBuilder.CreateBasicContent(contentType);
+        doc.SetCultureName("Home", "en-US");
+        doc.SetValue("title", "hello world", "en-US");
+        ContentService.Save(doc);
+
+        IContent doc2 = ContentBuilder.CreateBasicContent(contentType2);
+        doc2.SetCultureName("Home", "en-US");
+        doc2.SetValue("title", "hello world", "en-US");
+        ContentService.Save(doc2);
+
+        // change the property type to be invariant
+        contentType.PropertyTypes.First().Variations = invariant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+        doc2 = ContentService.GetById(doc2.Id); // re-get
+
+        Assert.AreEqual("hello world", doc.GetValue("title"));
+        Assert.AreEqual("hello world", doc2.GetValue("title"));
+
+        // change back property type to be variant
+        contentType.PropertyTypes.First().Variations = variant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+        doc2 = ContentService.GetById(doc2.Id); // re-get
+
+        Assert.AreEqual("hello world", doc.GetValue("title", "en-US"));
+        Assert.AreEqual("hello world", doc2.GetValue("title", "en-US"));
+    }
+
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    public async Task Change_Content_Type_From_Variant_Invariant_On_A_Composition(ContentVariation variant,
+        ContentVariation invariant)
+    {
+        // create content type with a property type that varies by culture
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+        contentType.Variations = variant;
+        var properties = CreatePropertyCollection(("title", ContentVariation.Culture));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // compose this from the other one
+        var contentType2 = ContentTypeBuilder.CreateBasicContentType("test");
+        contentType2.Variations = contentType.Variations;
+        contentType2.AddContentType(contentType);
+        await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+
+        // create some content of this content type
+        IContent doc = ContentBuilder.CreateBasicContent(contentType);
+        doc.SetCultureName("Home", "en-US");
+        doc.SetValue("title", "hello world", "en-US");
+        ContentService.Save(doc);
+
+        IContent doc2 = ContentBuilder.CreateBasicContent(contentType2);
+        doc2.SetCultureName("Home", "en-US");
+        doc2.SetValue("title", "hello world", "en-US");
+        ContentService.Save(doc2);
+
+        // change the content type to be invariant
+        contentType.Variations = invariant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+        doc2 = ContentService.GetById(doc2.Id); // re-get
+
+        Assert.AreEqual("hello world", doc.GetValue("title"));
+        Assert.AreEqual("hello world", doc2.GetValue("title"));
+
+        // change back content type to be variant
+        contentType.Variations = variant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        doc = ContentService.GetById(doc.Id); // re-get
+        doc2 = ContentService.GetById(doc2.Id); // re-get
+
+        // this will be null because the doc type was changed back to variant but it's property types don't get changed back
+        Assert.IsNull(doc.GetValue("title", "en-US"));
+        Assert.IsNull(doc2.GetValue("title", "en-US"));
+    }
+
+    [Test]
+    public async Task Change_Variations_SimpleContentType_VariantToInvariantAndBack()
+    {
+        // one simple content type, variant, with both variant and invariant properties
+        // can change it to invariant and back
+        await CreateFrenchAndEnglishLangs();
+
+        var contentType = CreateContentType(ContentVariation.Culture);
+
+        var properties = CreatePropertyCollection(
+            ("value1", ContentVariation.Culture),
+            ("value2", ContentVariation.Nothing));
+
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        var document = (IContent)new Content("document", -1, contentType);
+        document.SetCultureName("doc1en", "en");
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("value1", "v1en", "en");
+        document.SetValue("value1", "v1fr", "fr");
+        document.SetValue("value2", "v2");
+        ContentService.Save(document);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1", "en"));
+        Assert.AreEqual("v1fr", document.GetValue("value1", "fr"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'en','s':'','v':'v1en'},{'c':'fr','s':'','v':'v1fr'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch content type to Nothing
+        contentType.Variations = ContentVariation.Nothing;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.IsNull(document.GetCultureName("en"));
+        Assert.IsNull(document.GetCultureName("fr"));
+        Assert.IsNull(document.GetValue("value1", "en"));
+        Assert.IsNull(document.GetValue("value1", "fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'','s':'','v':'v1en'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch content back to Culture
+        contentType.Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.IsNull(document.GetValue("value1", "en"));
+        Assert.IsNull(document.GetValue("value1", "fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'','s':'','v':'v1en'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch property back to Culture
+        contentType.PropertyTypes.First(x => x.Alias == "value1").Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1", "en"));
+        Assert.AreEqual("v1fr", document.GetValue("value1", "fr"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'en','s':'','v':'v1en'},{'c':'fr','s':'','v':'v1fr'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+    }
+
+    [Test]
+    public async Task Change_Variations_SimpleContentType_InvariantToVariantAndBack()
+    {
+        // one simple content type, invariant
+        // can change it to variant and back
+        // can then switch one property to variant
+        var globalSettings = new GlobalSettings();
+
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        var contentType = CreateContentType(ContentVariation.Nothing);
+
+        var properties = CreatePropertyCollection(
+            ("value1", ContentVariation.Nothing),
+            ("value2", ContentVariation.Nothing));
+
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        var document = (IContent)new Content("document", -1, contentType);
+        document.Name = "doc1";
+        document.SetValue("value1", "v1");
+        document.SetValue("value2", "v2");
+        ContentService.Save(document);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1", document.Name);
+        Assert.IsNull(document.GetCultureName("en"));
+        Assert.IsNull(document.GetCultureName("fr"));
+        Assert.IsNull(document.GetValue("value1", "en"));
+        Assert.IsNull(document.GetValue("value1", "fr"));
+        Assert.AreEqual("v1", document.GetValue("value1"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'','s':'','v':'v1'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch content type to Culture
+        contentType.Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1", document.GetCultureName("en"));
+        Assert.IsNull(document.GetCultureName("fr"));
+        Assert.IsNull(document.GetValue("value1", "en"));
+        Assert.IsNull(document.GetValue("value1", "fr"));
+        Assert.AreEqual("v1", document.GetValue("value1"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'','s':'','v':'v1'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch property to Culture
+        contentType.PropertyTypes.First(x => x.Alias == "value1").Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1", document.GetCultureName("en"));
+        Assert.IsNull(document.GetCultureName("fr"));
+        Assert.AreEqual("v1", document.GetValue("value1", "en"));
+        Assert.IsNull(document.GetValue("value1", "fr"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'en','s':'','v':'v1'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch content back to Nothing
+        contentType.Variations = ContentVariation.Nothing;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1", document.Name);
+        Assert.IsNull(document.GetCultureName("en"));
+        Assert.IsNull(document.GetCultureName("fr"));
+        Assert.IsNull(document.GetValue("value1", "en"));
+        Assert.IsNull(document.GetValue("value1", "fr"));
+        Assert.AreEqual("v1", document.GetValue("value1"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'','s':'','v':'v1'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+    }
+
+    [Test]
+    public async Task Change_Variations_SimpleContentType_VariantPropertyToInvariantAndBack()
+    {
+        // one simple content type, variant, with both variant and invariant properties
+        // can change an invariant property to variant and back
+        await CreateFrenchAndEnglishLangs();
+
+        var contentType = CreateContentType(ContentVariation.Culture);
+
+        var properties = CreatePropertyCollection(
+            ("value1", ContentVariation.Culture),
+            ("value2", ContentVariation.Nothing));
+
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        var document = (IContent)new Content("document", -1, contentType);
+        document.SetCultureName("doc1en", "en");
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("value1", "v1en", "en");
+        document.SetValue("value1", "v1fr", "fr");
+        document.SetValue("value2", "v2");
+        ContentService.Save(document);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1", "en"));
+        Assert.AreEqual("v1fr", document.GetValue("value1", "fr"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'en','s':'','v':'v1en'},{'c':'fr','s':'','v':'v1fr'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch property type to Nothing
+        contentType.PropertyTypes.First(x => x.Alias == "value1").Variations = ContentVariation.Nothing;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.IsNull(document.GetValue("value1", "en"));
+        Assert.IsNull(document.GetValue("value1", "fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'','s':'','v':'v1en'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch property back to Culture
+        contentType.PropertyTypes.First(x => x.Alias == "value1").Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1", "en"));
+        Assert.AreEqual("v1fr", document.GetValue("value1", "fr"));
+        Assert.AreEqual("v2", document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'en','s':'','v':'v1en'},{'c':'fr','s':'','v':'v1fr'}],'value2':[{'c':'','s':'','v':'v2'}]},'cd':");
+
+        // switch other property to Culture
+        contentType.PropertyTypes.First(x => x.Alias == "value2").Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1", "en"));
+        Assert.AreEqual("v1fr", document.GetValue("value1", "fr"));
+        Assert.AreEqual("v2", document.GetValue("value2", "en"));
+        Assert.IsNull(document.GetValue("value2", "fr"));
+        Assert.IsNull(document.GetValue("value2"));
+
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value1':[{'c':'en','s':'','v':'v1en'},{'c':'fr','s':'','v':'v1fr'}],'value2':[{'c':'en','s':'','v':'v2'}]},'cd':");
+    }
+
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    public async Task Change_Property_Variations_From_Variant_To_Invariant_And_Ensure_Edited_Values_Are_Renormalized(
+        ContentVariation variant, ContentVariation invariant)
+    {
+        // one simple content type, variant, with both variant and invariant properties
+        // can change an invariant property to variant and back
+        await CreateFrenchAndEnglishLangs();
+
+        var contentType = CreateContentType(ContentVariation.Culture | ContentVariation.Segment);
+
+        var properties = CreatePropertyCollection(("value1", variant));
+
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        IContent document = new Content("document", -1, contentType);
+        document.SetCultureName("doc1en", "en");
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("value1", "v1en-init", "en");
+        document.SetValue("value1", "v1fr-init", "fr");
+        ContentService.Save(document);
+        ContentService.Publish(document, document.AvailableCultures.ToArray()); // all values are published which means the document is not 'edited'
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsFalse(document.IsCultureEdited("en"));
+        Assert.IsFalse(document.IsCultureEdited("fr"));
+        Assert.IsFalse(document.Edited);
+
+        document.SetValue(
+            "value1",
+            "v1en",
+            "en"); // change the property culture value, so now this culture will be edited
+        document.SetValue(
+            "value1",
+            "v1fr",
+            "fr"); // change the property culture value, so now this culture will be edited
+        ContentService.Save(document);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1", "en"));
+        Assert.AreEqual("v1en-init", document.GetValue("value1", "en", published: true));
+        Assert.AreEqual("v1fr", document.GetValue("value1", "fr"));
+        Assert.AreEqual("v1fr-init", document.GetValue("value1", "fr", published: true));
+        Assert.IsTrue(
+            document.IsCultureEdited(
+                "en")); // This will be true because the edited value isn't the same as the published value
+        Assert.IsTrue(
+            document.IsCultureEdited(
+                "fr")); // This will be true because the edited value isn't the same as the published value
+        Assert.IsTrue(document.Edited);
+
+        // switch property type to Invariant
+        contentType.PropertyTypes.First(x => x.Alias == "value1").Variations = invariant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey); // This is going to have to re-normalize the "Edited" flag
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsTrue(
+            document.IsCultureEdited(
+                "en")); // This will remain true because there is now a pending change for the invariant property data which is flagged under the default lang
+        Assert.IsFalse(
+            document.IsCultureEdited(
+                "fr")); // This will be false because nothing has changed for this culture and the property no longer reflects variant changes
+        Assert.IsTrue(document.Edited);
+
+        // update the invariant value and publish
+        document.SetValue("value1", "v1inv");
+        ContentService.Save(document);
+        ContentService.Publish(document, document.AvailableCultures.ToArray());
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.IsNull(document.GetValue("value1", "en")); // The values are there but the business logic returns null
+        Assert.IsNull(document.GetValue("value1", "fr")); // The values are there but the business logic returns null
+        Assert.IsNull(document.GetValue(
+            "value1",
+            "en",
+            published: true)); // The values are there but the business logic returns null
+        Assert.IsNull(document.GetValue(
+            "value1",
+            "fr",
+            published: true)); // The values are there but the business logic returns null
+        Assert.AreEqual("v1inv", document.GetValue("value1"));
+        Assert.AreEqual("v1inv", document.GetValue("value1", published: true));
+        Assert.IsFalse(document.IsCultureEdited("en")); // This returns false, everything is published
+        Assert.IsFalse(
+            document.IsCultureEdited(
+                "fr")); // This will be false because nothing has changed for this culture and the property no longer reflects variant changes
+        Assert.IsFalse(document.Edited);
+
+        // switch property back to Culture
+        contentType.PropertyTypes.First(x => x.Alias == "value1").Variations = variant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("v1inv",
+            document.GetValue("value1", "en")); // The invariant property value gets copied over to the default language
+        Assert.AreEqual("v1inv", document.GetValue("value1", "en", published: true));
+        Assert.AreEqual("v1fr", document.GetValue("value1", "fr")); // values are still retained
+        Assert.AreEqual("v1fr-init", document.GetValue("value1", "fr", published: true)); // values are still retained
+        Assert.IsFalse(
+            document.IsCultureEdited(
+                "en")); // The invariant published AND edited values are copied over to the default language
+        Assert.IsTrue(
+            document.IsCultureEdited(
+                "fr")); // The previously existing french values are there and there is no published value
+        Assert.IsTrue(document.Edited); // Will be flagged edited again because the french culture had pending changes
+
+        // publish again
+        document.SetValue("value1", "v1en2", "en"); // update the value now that it's variant again
+        document.SetValue("value1", "v1fr2", "fr"); // update the value now that it's variant again
+        ContentService.Save(document);
+        ContentService.Publish(document, document.AvailableCultures.ToArray());
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("v1en2", document.GetValue("value1", "en"));
+        Assert.AreEqual("v1fr2", document.GetValue("value1", "fr"));
+        Assert.IsNull(document.GetValue("value1")); // The value is there but the business logic returns null
+        Assert.IsFalse(
+            document.IsCultureEdited("en")); // This returns false, the variant property value has been published
+        Assert.IsFalse(
+            document.IsCultureEdited("fr")); // This returns false, the variant property value has been published
+        Assert.IsFalse(document.Edited);
+    }
+
+    [TestCase(ContentVariation.Nothing, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Segment, ContentVariation.CultureAndSegment)]
+    public async Task Change_Property_Variations_From_Invariant_To_Variant_And_Ensure_Edited_Values_Are_Renormalized(
+        ContentVariation invariant, ContentVariation variant)
+    {
+        // one simple content type, variant, with both variant and invariant properties
+        // can change an invariant property to variant and back
+        await CreateFrenchAndEnglishLangs();
+
+        var contentType = CreateContentType(ContentVariation.Culture | ContentVariation.Segment);
+
+        var properties = CreatePropertyCollection(("value1", invariant));
+
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        var document = (IContent)new Content("document", -1, contentType);
+        document.SetCultureName("doc1en", "en");
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("value1", "v1en-init");
+        ContentService.Save(document); // all values are published which means the document is not 'edited'
+        ContentService.Publish(document, document.AvailableCultures.ToArray());
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsFalse(document.IsCultureEdited("en"));
+        Assert.IsFalse(document.IsCultureEdited("fr"));
+        Assert.IsFalse(document.Edited);
+
+        document.SetValue("value1",
+            "v1en"); // change the property value, so now the invariant (default) culture will be edited
+        ContentService.Save(document);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("v1en", document.GetValue("value1"));
+        Assert.AreEqual("v1en-init", document.GetValue("value1", published: true));
+        Assert.IsTrue(
+            document.IsCultureEdited(
+                "en")); // This is true because the invariant property reflects changes on the default lang
+        Assert.IsFalse(document.IsCultureEdited("fr"));
+        Assert.IsTrue(document.Edited);
+
+        // switch property type to Culture
+        contentType.PropertyTypes.First(x => x.Alias == "value1").Variations = variant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey); // This is going to have to re-normalize the "Edited" flag
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsTrue(document.IsCultureEdited("en")); // Remains true
+        Assert.IsFalse(document.IsCultureEdited("fr")); // False because no french property has ever been edited
+        Assert.IsTrue(document.Edited);
+
+        // update the culture value and publish
+        document.SetValue("value1", "v1en2", "en");
+        ContentService.Save(document);
+        ContentService.Publish(document, document.AvailableCultures.ToArray());
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1en", document.Name);
+        Assert.AreEqual("doc1en", document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.IsNull(document.GetValue("value1")); // The values are there but the business logic returns null
+        Assert.IsNull(document.GetValue("value1",
+            published: true)); // The values are there but the business logic returns null
+        Assert.AreEqual("v1en2", document.GetValue("value1", "en"));
+        Assert.AreEqual("v1en2", document.GetValue("value1", "en", published: true));
+        Assert.IsFalse(document.IsCultureEdited("en")); // This returns false, everything is published
+        Assert.IsFalse(document.IsCultureEdited("fr")); // False because no french property has ever been edited
+        Assert.IsFalse(document.Edited);
+
+        // switch property back to Invariant
+        contentType.PropertyTypes.First(x => x.Alias == "value1").Variations = invariant;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("v1en2",
+            document.GetValue("value1")); // The variant property value gets copied over to the invariant
+        Assert.AreEqual("v1en2", document.GetValue("value1", published: true));
+        Assert.IsNull(document.GetValue("value1", "fr")); // The values are there but the business logic returns null
+        Assert.IsNull(document.GetValue(
+            "value1",
+            "fr",
+            published: true)); // The values are there but the business logic returns null
+        Assert.IsFalse(
+            document.IsCultureEdited("en")); // The variant published AND edited values are copied over to the invariant
+        Assert.IsFalse(document.IsCultureEdited("fr"));
+        Assert.IsFalse(document.Edited);
+    }
+
+    [Test]
+    public async Task Change_Variations_ComposedContentType_1()
+    {
+        // one composing content type, variant, with both variant and invariant properties
+        // one composed content type, variant, with both variant and invariant properties
+        // can change the composing content type to invariant and back
+        // can change the composed content type to invariant and back
+        await CreateFrenchAndEnglishLangs();
+
+        var composing = CreateContentType(ContentVariation.Culture, "composing");
+
+        var properties1 = CreatePropertyCollection(
+            ("value11", ContentVariation.Culture),
+            ("value12", ContentVariation.Nothing));
+
+        composing.PropertyGroups.Add(new PropertyGroup(properties1) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(composing, Constants.Security.SuperUserKey);
+
+        var composed = CreateContentType(ContentVariation.Culture, "composed");
+
+        var properties2 = CreatePropertyCollection(
+            ("value21", ContentVariation.Culture),
+            ("value22", ContentVariation.Nothing));
+
+        composed.PropertyGroups.Add(new PropertyGroup(properties2) { Alias = "content", Name = "Content" });
+        composed.AddContentType(composing);
+        await ContentTypeService.CreateAsync(composed, Constants.Security.SuperUserKey);
+
+        var document = (IContent)new Content("document", -1, composed);
+        document.SetCultureName("doc1en", "en");
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("value11", "v11en", "en");
+        document.SetValue("value11", "v11fr", "fr");
+        document.SetValue("value12", "v12");
+        document.SetValue("value21", "v21en", "en");
+        document.SetValue("value21", "v21fr", "fr");
+        document.SetValue("value22", "v22");
+        ContentService.Save(document);
+
+        // both value11 and value21 are variant
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value11':[{'c':'en','s':'','v':'v11en'},{'c':'fr','s':'','v':'v11fr'}],'value12':[{'c':'','s':'','v':'v12'}],'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}]},'cd':");
+
+        composed.Variations = ContentVariation.Nothing;
+        await ContentTypeService.CreateAsync(composed, Constants.Security.SuperUserKey);
+
+        // both value11 and value21 are invariant
+        // Note: After rebuild, property order changes to direct properties first (value21, value22), then composed (value11, value12)
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value21':[{'c':'','s':'','v':'v21en'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'','s':'','v':'v11en'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        composed.Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(composed, Constants.Security.SuperUserKey);
+
+        // value11 is variant again, but value21 is still invariant
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value21':[{'c':'','s':'','v':'v21en'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'en','s':'','v':'v11en'},{'c':'fr','s':'','v':'v11fr'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        composed.PropertyTypes.First(x => x.Alias == "value21").Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(composed, Constants.Security.SuperUserKey);
+
+        // we can make it variant again
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'en','s':'','v':'v11en'},{'c':'fr','s':'','v':'v11fr'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        composing.Variations = ContentVariation.Nothing;
+        await ContentTypeService.CreateAsync(composing, Constants.Security.SuperUserKey);
+
+        // value11 is invariant
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'','s':'','v':'v11en'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        composing.Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(composing, Constants.Security.SuperUserKey);
+
+        // value11 is still invariant
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'','s':'','v':'v11en'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        composing.PropertyTypes.First(x => x.Alias == "value11").Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(composing, Constants.Security.SuperUserKey);
+
+        // we can make it variant again
+        Console.WriteLine(GetJson(document.Id));
+        AssertJsonStartsWith(
+            document.Id,
+            "{'pd':{'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'en','s':'','v':'v11en'},{'c':'fr','s':'','v':'v11fr'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+    }
+
+    [Test]
+    public async Task Change_Variations_ComposedContentType_2()
+    {
+        // one composing content type, variant, with both variant and invariant properties
+        // one composed content type, variant, with both variant and invariant properties
+        // one composed content type, invariant
+        // can change the composing content type to invariant and back
+        // can change the variant composed content type to invariant and back
+        await CreateFrenchAndEnglishLangs();
+
+        var composing = CreateContentType(ContentVariation.Culture, "composing");
+
+        var properties1 = CreatePropertyCollection(
+            ("value11", ContentVariation.Culture),
+            ("value12", ContentVariation.Nothing));
+
+        composing.PropertyGroups.Add(new PropertyGroup(properties1) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(composing, Constants.Security.SuperUserKey);
+
+        var composed1 = CreateContentType(ContentVariation.Culture, "composed1");
+
+        var properties2 = CreatePropertyCollection(
+            ("value21", ContentVariation.Culture),
+            ("value22", ContentVariation.Nothing));
+
+        composed1.PropertyGroups.Add(new PropertyGroup(properties2) { Alias = "content", Name = "Content" });
+        composed1.AddContentType(composing);
+        await ContentTypeService.CreateAsync(composed1, Constants.Security.SuperUserKey);
+
+        var composed2 = CreateContentType(ContentVariation.Nothing, "composed2");
+
+        var properties3 = CreatePropertyCollection(
+            ("value31", ContentVariation.Nothing),
+            ("value32", ContentVariation.Nothing));
+
+        composed2.PropertyGroups.Add(new PropertyGroup(properties3) { Alias = "content", Name = "Content" });
+        composed2.AddContentType(composing);
+        await ContentTypeService.CreateAsync(composed2, Constants.Security.SuperUserKey);
+
+        var document1 = (IContent)new Content("document1", -1, composed1);
+        document1.SetCultureName("doc1en", "en");
+        document1.SetCultureName("doc1fr", "fr");
+        document1.SetValue("value11", "v11en", "en");
+        document1.SetValue("value11", "v11fr", "fr");
+        document1.SetValue("value12", "v12");
+        document1.SetValue("value21", "v21en", "en");
+        document1.SetValue("value21", "v21fr", "fr");
+        document1.SetValue("value22", "v22");
+        ContentService.Save(document1);
+
+        var document2 = (IContent)new Content("document2", -1, composed2);
+        document2.Name = "doc2";
+        document2.SetValue("value11", "v11");
+        document2.SetValue("value12", "v12");
+        document2.SetValue("value31", "v31");
+        document2.SetValue("value32", "v32");
+        ContentService.Save(document2);
+
+        // both value11 and value21 are variant
+        Console.WriteLine(GetJson(document1.Id));
+        AssertJsonStartsWith(
+            document1.Id,
+            "{'pd':{'value11':[{'c':'en','s':'','v':'v11en'},{'c':'fr','s':'','v':'v11fr'}],'value12':[{'c':'','s':'','v':'v12'}],'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}]},'cd':");
+
+        Console.WriteLine(GetJson(document2.Id));
+        AssertJsonStartsWith(
+            document2.Id,
+            "{'pd':{'value11':[{'c':'','s':'','v':'v11'}],'value12':[{'c':'','s':'','v':'v12'}],'value31':[{'c':'','s':'','v':'v31'}],'value32':[{'c':'','s':'','v':'v32'}]},'cd':");
+
+        composed1.Variations = ContentVariation.Nothing;
+        await ContentTypeService.CreateAsync(composed1, Constants.Security.SuperUserKey);
+
+        // both value11 and value21 are invariant
+        // Note: After rebuild, property order changes to direct properties first, then composed properties
+        Console.WriteLine(GetJson(document1.Id));
+        AssertJsonStartsWith(
+            document1.Id,
+            "{'pd':{'value21':[{'c':'','s':'','v':'v21en'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'','s':'','v':'v11en'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        // document2 uses composed2 (not composed1), so it's not rebuilt - order stays the same
+        Console.WriteLine(GetJson(document2.Id));
+        AssertJsonStartsWith(
+            document2.Id,
+            "{'pd':{'value11':[{'c':'','s':'','v':'v11'}],'value12':[{'c':'','s':'','v':'v12'}],'value31':[{'c':'','s':'','v':'v31'}],'value32':[{'c':'','s':'','v':'v32'}]},'cd':");
+
+        composed1.Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(composed1, Constants.Security.SuperUserKey);
+
+        // value11 is variant again, but value21 is still invariant
+        Console.WriteLine(GetJson(document1.Id));
+        AssertJsonStartsWith(
+            document1.Id,
+            "{'pd':{'value21':[{'c':'','s':'','v':'v21en'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'en','s':'','v':'v11en'},{'c':'fr','s':'','v':'v11fr'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        // document2 uses composed2 (not composed1), so it's not rebuilt - order stays the same
+        Console.WriteLine(GetJson(document2.Id));
+        AssertJsonStartsWith(
+            document2.Id,
+            "{'pd':{'value11':[{'c':'','s':'','v':'v11'}],'value12':[{'c':'','s':'','v':'v12'}],'value31':[{'c':'','s':'','v':'v31'}],'value32':[{'c':'','s':'','v':'v32'}]},'cd':");
+
+        composed1.PropertyTypes.First(x => x.Alias == "value21").Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(composed1, Constants.Security.SuperUserKey);
+
+        // we can make it variant again
+        Console.WriteLine(GetJson(document1.Id));
+        AssertJsonStartsWith(
+            document1.Id,
+            "{'pd':{'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'en','s':'','v':'v11en'},{'c':'fr','s':'','v':'v11fr'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        // document2 uses composed2 (not composed1), so it's not rebuilt - order stays the same
+        Console.WriteLine(GetJson(document2.Id));
+        AssertJsonStartsWith(
+            document2.Id,
+            "{'pd':{'value11':[{'c':'','s':'','v':'v11'}],'value12':[{'c':'','s':'','v':'v12'}],'value31':[{'c':'','s':'','v':'v31'}],'value32':[{'c':'','s':'','v':'v32'}]},'cd':");
+
+        composing.Variations = ContentVariation.Nothing;
+        await ContentTypeService.CreateAsync(composing, Constants.Security.SuperUserKey);
+
+        // value11 is invariant
+        Console.WriteLine(GetJson(document1.Id));
+        AssertJsonStartsWith(
+            document1.Id,
+            "{'pd':{'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'','s':'','v':'v11en'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        Console.WriteLine(GetJson(document2.Id));
+        AssertJsonStartsWith(
+            document2.Id,
+            "{'pd':{'value31':[{'c':'','s':'','v':'v31'}],'value32':[{'c':'','s':'','v':'v32'}],'value11':[{'c':'','s':'','v':'v11'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        composing.Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(composing, Constants.Security.SuperUserKey);
+
+        // value11 is still invariant
+        Console.WriteLine(GetJson(document1.Id));
+        AssertJsonStartsWith(
+            document1.Id,
+            "{'pd':{'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'','s':'','v':'v11en'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        Console.WriteLine(GetJson(document2.Id));
+        AssertJsonStartsWith(
+            document2.Id,
+            "{'pd':{'value31':[{'c':'','s':'','v':'v31'}],'value32':[{'c':'','s':'','v':'v32'}],'value11':[{'c':'','s':'','v':'v11'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        composing.PropertyTypes.First(x => x.Alias == "value11").Variations = ContentVariation.Culture;
+        await ContentTypeService.CreateAsync(composing, Constants.Security.SuperUserKey);
+
+        // we can make it variant again
+        Console.WriteLine(GetJson(document1.Id));
+        AssertJsonStartsWith(
+            document1.Id,
+            "{'pd':{'value21':[{'c':'en','s':'','v':'v21en'},{'c':'fr','s':'','v':'v21fr'}],'value22':[{'c':'','s':'','v':'v22'}],'value11':[{'c':'en','s':'','v':'v11en'},{'c':'fr','s':'','v':'v11fr'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+
+        Console.WriteLine(GetJson(document2.Id));
+        AssertJsonStartsWith(
+            document2.Id,
+            "{'pd':{'value31':[{'c':'','s':'','v':'v31'}],'value32':[{'c':'','s':'','v':'v32'}],'value11':[{'c':'','s':'','v':'v11'}],'value12':[{'c':'','s':'','v':'v12'}]},'cd':");
+    }
+
+    private async Task CreateFrenchAndEnglishLangs()
+    {
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+    }
+
+    private IContentType CreateContentType(ContentVariation variance, string alias = "contentType") =>
+        new ContentType(ShortStringHelper, -1) { Alias = alias, Name = alias, Variations = variance };
+
+    private PropertyTypeCollection CreatePropertyCollection(params (string alias, ContentVariation variance)[] props)
+    {
+        var propertyCollection = new PropertyTypeCollection(true);
+
+        foreach ((var alias, var variance) in props)
+        {
+            propertyCollection.Add(new PropertyType(ShortStringHelper, alias, ValueStorageType.Ntext)
+            {
+                Alias = alias,
+                DataTypeId = -88,
+                Variations = variance
+            });
+        }
+
+        return propertyCollection;
+    }
+
+    /// <summary>
+    /// Tests that changing a property from invariant to variant does not throw an exception
+    /// when content exists only in a non-default language.
+    /// This is a regression test for https://github.com/umbraco/Umbraco-CMS/issues/11771
+    /// </summary>
+    [TestCase(ContentVariation.Nothing, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Segment, ContentVariation.CultureAndSegment)]
+    public async Task Change_Property_Type_From_Invariant_To_Variant_When_Content_Only_Exists_In_Non_Default_Language(
+        ContentVariation invariant, ContentVariation variant)
+    {
+        // Arrange - Create languages with English as default and French as non-default
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        // Create a content type that varies by culture with an invariant property
+        var contentType = CreateContentType(ContentVariation.Culture | ContentVariation.Segment);
+        var properties = CreatePropertyCollection(("title", invariant));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create content ONLY in the non-default language (French)
+        // This is the key scenario - no content exists in the default language (English)
+        IContent document = new Content("document", -1, contentType);
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("title", "hello world"); // invariant property
+        ContentService.Save(document);
+        ContentService.Publish(document, new[] { "fr" }); // Only publish in French
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsNull(document.GetCultureName("en")); // No English version exists
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("hello world", document.GetValue("title"));
+
+        // Act - Change the property type from invariant to variant
+        // This should NOT throw a PanicException even though content only exists in non-default language
+        contentType.PropertyTypes.First(x => x.Alias == "title").Variations = variant;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        // Assert - Content should still be accessible
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        // The invariant value should be migrated to the default language
+        Assert.AreEqual("hello world", document.GetValue("title", "en"));
+    }
+
+    /// <summary>
+    /// Tests that changing a property from variant to invariant does not throw an exception
+    /// when content exists only in a non-default language.
+    /// This is a regression test for https://github.com/umbraco/Umbraco-CMS/issues/11771
+    /// </summary>
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    public async Task Change_Property_Type_From_Variant_To_Invariant_When_Content_Only_Exists_In_Non_Default_Language(
+        ContentVariation variant, ContentVariation invariant)
+    {
+        // Arrange - Create languages with English as default and French as non-default
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        // Create a content type that varies by culture with a variant property
+        var contentType = CreateContentType(ContentVariation.Culture | ContentVariation.Segment);
+        var properties = CreatePropertyCollection(("title", variant));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create content ONLY in the non-default language (French)
+        IContent document = new Content("document", -1, contentType);
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("title", "bonjour monde", "fr"); // variant property value in French only
+        ContentService.Save(document);
+        ContentService.Publish(document, new[] { "fr" }); // Only publish in French
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsNull(document.GetCultureName("en")); // No English version exists
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("bonjour monde", document.GetValue("title", "fr"));
+        Assert.IsNull(document.GetValue("title", "en")); // No English value
+
+        // Act - Change the property type from variant to invariant
+        // This should NOT throw a PanicException even though content only exists in non-default language
+        contentType.PropertyTypes.First(x => x.Alias == "title").Variations = invariant;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        // Assert - Content should still be accessible
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        // The variant value from the default language should be used (which was null/empty),
+        // or the French value depending on implementation
+    }
+
+    /// <summary>
+    /// Tests that changing a property from invariant to variant and back does not throw an exception
+    /// when content exists only in a non-default language.
+    /// This is a regression test for https://github.com/umbraco/Umbraco-CMS/issues/11771
+    /// </summary>
+    [Test]
+    public async Task Change_Property_Type_Invariant_To_Variant_And_Back_When_Content_Only_Exists_In_Non_Default_Language()
+    {
+        // Arrange - Create languages with English as default and French as non-default
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        // Create a content type that varies by culture with an invariant property
+        var contentType = CreateContentType(ContentVariation.Culture);
+        var properties = CreatePropertyCollection(("title", ContentVariation.Nothing));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create content ONLY in the non-default language (French)
+        IContent document = new Content("document", -1, contentType);
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("title", "hello world"); // invariant property
+        ContentService.Save(document);
+        ContentService.Publish(document, new[] { "fr" }); // Only publish in French
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsNull(document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("hello world", document.GetValue("title"));
+
+        // Act 1 - Change property from invariant to variant
+        contentType.PropertyTypes.First(x => x.Alias == "title").Variations = ContentVariation.Culture;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("hello world", document.GetValue("title", "en")); // Migrated to default language
+
+        // Act 2 - Change property back from variant to invariant
+        contentType.PropertyTypes.First(x => x.Alias == "title").Variations = ContentVariation.Nothing;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        // Assert - Content should still be accessible
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("hello world", document.GetValue("title"));
+    }
+
+    /// <summary>
+    /// Tests that changing a content type from invariant to variant does not throw an exception
+    /// when content exists only in a non-default language.
+    /// This is a regression test for https://github.com/umbraco/Umbraco-CMS/issues/11771
+    /// </summary>
+    [Test]
+    public async Task Change_Content_Type_From_Invariant_To_Variant_When_Content_Only_Exists_In_Non_Default_Language()
+    {
+        // Arrange - Create languages with English as default and French as non-default
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        // Create an invariant content type first
+        var contentType = CreateContentType(ContentVariation.Nothing);
+        var properties = CreatePropertyCollection(("title", ContentVariation.Nothing));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create invariant content
+        IContent document = new Content("document", -1, contentType);
+        document.Name = "doc1";
+        document.SetValue("title", "hello world");
+        ContentService.Save(document);
+        ContentService.Publish(document, Array.Empty<string>());
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1", document.Name);
+        Assert.AreEqual("hello world", document.GetValue("title"));
+
+        // Act - Change content type from invariant to variant
+        // This changes the content to be culture-variant, with the invariant data
+        // migrated to the default language
+        contentType.Variations = ContentVariation.Culture;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        // Assert - Content should be accessible in the default language
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("doc1", document.GetCultureName("en"));
+        Assert.AreEqual("hello world", document.GetValue("title"));
+    }
+
+    /// <summary>
+    /// Tests that changing a property from invariant to variant does not throw an exception
+    /// when content exists only in a non-default language with AllowEditInvariantFromNonDefault enabled.
+    /// This is a regression test for https://github.com/umbraco/Umbraco-CMS/issues/11771
+    /// </summary>
+    [TestCase(ContentVariation.Nothing, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Nothing, ContentVariation.CultureAndSegment)]
+    [TestCase(ContentVariation.Segment, ContentVariation.Culture)]
+    [TestCase(ContentVariation.Segment, ContentVariation.CultureAndSegment)]
+    [ConfigureBuilder(ActionName = nameof(ConfigureAllowEditInvariantFromNonDefaultTrue))]
+    public async Task Change_Property_Type_From_Invariant_To_Variant_When_Content_Only_Exists_In_Non_Default_Language_With_AllowEditInvariantFromNonDefault(
+        ContentVariation invariant, ContentVariation variant)
+    {
+        // Arrange - Create languages with English as default and French as non-default
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        // Create a content type that varies by culture with an invariant property
+        var contentType = CreateContentType(ContentVariation.Culture | ContentVariation.Segment);
+        var properties = CreatePropertyCollection(("title", invariant));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create content ONLY in the non-default language (French)
+        // This is the key scenario - no content exists in the default language (English)
+        IContent document = new Content("document", -1, contentType);
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("title", "hello world"); // invariant property
+        ContentService.Save(document);
+        ContentService.Publish(document, new[] { "fr" }); // Only publish in French
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsNull(document.GetCultureName("en")); // No English version exists
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("hello world", document.GetValue("title"));
+
+        // Act - Change the property type from invariant to variant
+        // This should NOT throw a PanicException even though content only exists in non-default language
+        contentType.PropertyTypes.First(x => x.Alias == "title").Variations = variant;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        // Assert - Content should still be accessible
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        // The invariant value should be migrated to the default language
+        Assert.AreEqual("hello world", document.GetValue("title", "en"));
+    }
+
+    /// <summary>
+    /// Tests that changing a property from variant to invariant does not throw an exception
+    /// when content exists only in a non-default language with AllowEditInvariantFromNonDefault enabled.
+    /// This is a regression test for https://github.com/umbraco/Umbraco-CMS/issues/11771
+    /// </summary>
+    [TestCase(ContentVariation.Culture, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.Culture, ContentVariation.Segment)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Nothing)]
+    [TestCase(ContentVariation.CultureAndSegment, ContentVariation.Segment)]
+    [ConfigureBuilder(ActionName = nameof(ConfigureAllowEditInvariantFromNonDefaultTrue))]
+    public async Task Change_Property_Type_From_Variant_To_Invariant_When_Content_Only_Exists_In_Non_Default_Language_With_AllowEditInvariantFromNonDefault(
+        ContentVariation variant, ContentVariation invariant)
+    {
+        // Arrange - Create languages with English as default and French as non-default
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        // Create a content type that varies by culture with a variant property
+        var contentType = CreateContentType(ContentVariation.Culture | ContentVariation.Segment);
+        var properties = CreatePropertyCollection(("title", variant));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create content ONLY in the non-default language (French)
+        IContent document = new Content("document", -1, contentType);
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("title", "bonjour monde", "fr"); // variant property value in French only
+        ContentService.Save(document);
+        ContentService.Publish(document, new[] { "fr" }); // Only publish in French
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsNull(document.GetCultureName("en")); // No English version exists
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("bonjour monde", document.GetValue("title", "fr"));
+        Assert.IsNull(document.GetValue("title", "en")); // No English value
+
+        // Act - Change the property type from variant to invariant
+        // This should NOT throw a PanicException even though content only exists in non-default language
+        contentType.PropertyTypes.First(x => x.Alias == "title").Variations = invariant;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        // Assert - Content should still be accessible
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        // The variant value from the default language should be used (which was null/empty),
+        // or the French value depending on implementation
+    }
+
+    /// <summary>
+    /// Tests that changing a property from invariant to variant and back does not throw an exception
+    /// when content exists only in a non-default language with AllowEditInvariantFromNonDefault enabled.
+    /// This is a regression test for https://github.com/umbraco/Umbraco-CMS/issues/11771
+    /// </summary>
+    [Test]
+    [ConfigureBuilder(ActionName = nameof(ConfigureAllowEditInvariantFromNonDefaultTrue))]
+    public async Task Change_Property_Type_Invariant_To_Variant_And_Back_When_Content_Only_Exists_In_Non_Default_Language_With_AllowEditInvariantFromNonDefault()
+    {
+        // Arrange - Create languages with English as default and French as non-default
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        // Create a content type that varies by culture with an invariant property
+        var contentType = CreateContentType(ContentVariation.Culture);
+        var properties = CreatePropertyCollection(("title", ContentVariation.Nothing));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create content ONLY in the non-default language (French)
+        IContent document = new Content("document", -1, contentType);
+        document.SetCultureName("doc1fr", "fr");
+        document.SetValue("title", "hello world"); // invariant property
+        ContentService.Save(document);
+        ContentService.Publish(document, new[] { "fr" }); // Only publish in French
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsNull(document.GetCultureName("en"));
+        Assert.AreEqual("doc1fr", document.GetCultureName("fr"));
+        Assert.AreEqual("hello world", document.GetValue("title"));
+
+        // Act 1 - Change property from invariant to variant
+        contentType.PropertyTypes.First(x => x.Alias == "title").Variations = ContentVariation.Culture;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("hello world", document.GetValue("title", "en")); // Migrated to default language
+
+        // Act 2 - Change property back from variant to invariant
+        contentType.PropertyTypes.First(x => x.Alias == "title").Variations = ContentVariation.Nothing;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        // Assert - Content should still be accessible
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("hello world", document.GetValue("title"));
+    }
+
+    /// <summary>
+    /// Tests that changing a content type from invariant to variant does not throw an exception
+    /// when content exists only in a non-default language with AllowEditInvariantFromNonDefault enabled.
+    /// This is a regression test for https://github.com/umbraco/Umbraco-CMS/issues/11771
+    /// </summary>
+    [Test]
+    [ConfigureBuilder(ActionName = nameof(ConfigureAllowEditInvariantFromNonDefaultTrue))]
+    public async Task Change_Content_Type_From_Invariant_To_Variant_When_Content_Only_Exists_In_Non_Default_Language_With_AllowEditInvariantFromNonDefault()
+    {
+        // Arrange - Create languages with English as default and French as non-default
+        var languageEn = new Language("en", "English") { IsDefault = true };
+        await LanguageService.CreateAsync(languageEn, Constants.Security.SuperUserKey);
+        var languageFr = new Language("fr", "French");
+        await LanguageService.CreateAsync(languageFr, Constants.Security.SuperUserKey);
+
+        // Create an invariant content type first
+        var contentType = CreateContentType(ContentVariation.Nothing);
+        var properties = CreatePropertyCollection(("title", ContentVariation.Nothing));
+        contentType.PropertyGroups.Add(new PropertyGroup(properties) { Alias = "content", Name = "Content" });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create invariant content
+        IContent document = new Content("document", -1, contentType);
+        document.Name = "doc1";
+        document.SetValue("title", "hello world");
+        ContentService.Save(document);
+        ContentService.Publish(document, Array.Empty<string>());
+
+        document = ContentService.GetById(document.Id);
+        Assert.AreEqual("doc1", document.Name);
+        Assert.AreEqual("hello world", document.GetValue("title"));
+
+        // Act - Change content type from invariant to variant
+        // This changes the content to be culture-variant, with the invariant data
+        // migrated to the default language
+        contentType.Variations = ContentVariation.Culture;
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey));
+
+        // Assert - Content should be accessible in the default language
+        document = ContentService.GetById(document.Id);
+        Assert.IsNotNull(document);
+        Assert.AreEqual("doc1", document.GetCultureName("en"));
+        Assert.AreEqual("hello world", document.GetValue("title"));
+    }
+}

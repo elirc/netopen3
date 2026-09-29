@@ -1,0 +1,582 @@
+import {ConstantHelper, test} from '@umbraco/acceptance-test-helpers';
+import {expect} from "@playwright/test";
+
+const allPermissions = {
+  uiDocumentPermission: [
+    "Read",
+    "Create Document Blueprint",
+    "Delete",
+    "Create",
+    "Notifications",
+    "Publish",
+    "Unpublish",
+    "Update",
+    "Duplicate",
+    "Move to",
+    "Sort children",
+    "Culture and Hostnames",
+    "Public Access",
+    "Rollback",
+  ],
+  verbDocumentPermission: [
+    "Umb.Document.Read",
+    "Umb.Document.CreateBlueprint",
+    "Umb.Document.Delete",
+    "Umb.Document.Create",
+    "Umb.Document.Notifications",
+    "Umb.Document.Publish",
+    "Umb.Document.Unpublish",
+    "Umb.Document.Update",
+    "Umb.Document.Duplicate",
+    "Umb.Document.Move",
+    "Umb.Document.Sort",
+    "Umb.Document.CultureAndHostnames",
+    "Umb.Document.PublicAccess",
+    "Umb.Document.Rollback",
+  ],
+  uiElementPermission: [
+    "Read",
+    "Create",
+    "Delete",
+    "Publish",
+    "Unpublish",
+    "Update",
+    "Duplicate",
+    "Move",
+    "Rollback",
+  ],
+  verbElementPermission: [
+    "Umb.Element.Read",
+    "Umb.Element.Create",
+    "Umb.Element.Delete",
+    "Umb.Element.Publish",
+    "Umb.Element.Unpublish",
+    "Umb.Element.Update",
+    "Umb.Element.Duplicate",
+    "Umb.Element.Move",
+    "Umb.Element.Rollback",
+  ]
+};
+
+const englishLanguage = 'English (United States)';
+
+const userGroupName = 'TestUserGroupName';
+
+test.beforeEach(async ({umbracoUi, umbracoApi}) => {
+  await umbracoApi.userGroup.ensureNameNotExists(userGroupName);
+  await umbracoUi.goToBackOffice();
+  await umbracoUi.userGroup.goToSection(ConstantHelper.sections.users);
+});
+
+test.afterEach(async ({umbracoApi}) => {
+  await umbracoApi.userGroup.ensureNameNotExists(userGroupName);
+});
+
+test('can create an empty user group', {tag: '@release'}, async ({umbracoApi, umbracoUi}) => {
+  // Act
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickCreateLink();
+  await umbracoUi.userGroup.enterUserGroupName(userGroupName);
+  const userGroupId = await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeCreated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesExist(userGroupId)).toBe(true);
+  // Checks if the user group was created in the UI as well
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.isUserGroupWithNameVisible(userGroupName);
+});
+
+test('can rename a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  const oldUserGroupName = 'OldUserGroupName';
+  await umbracoApi.userGroup.ensureNameNotExists(oldUserGroupName);
+  await umbracoApi.userGroup.createEmptyUserGroup(oldUserGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(oldUserGroupName);
+
+  // Act
+  await umbracoUi.userGroup.enterUserGroupName(userGroupName);
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesNameExist(userGroupName)).toBeTruthy();
+  // Checks if the user group was created in the UI as well
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.isUserGroupWithNameVisible(userGroupName);
+  await umbracoUi.userGroup.isUserGroupWithNameVisible(oldUserGroupName, false);
+});
+
+test('can update a user group', {tag: '@release'}, async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickDocumentPermissionsByName([allPermissions.uiDocumentPermission[0]]);
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.reloadPage();
+  await umbracoUi.userGroup.doesUserGroupHaveDocumentPermission(allPermissions.uiDocumentPermission[0]);
+  const userGroupData = await umbracoApi.userGroup.getByName(userGroupName);
+  expect(userGroupData.fallbackPermissions).toContain(allPermissions.verbDocumentPermission[0]);
+});
+
+test('can delete a user group', {tag: '@release'}, async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createSimpleUserGroupWithContentSection(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickActionButton();
+  await umbracoUi.userGroup.clickDeleteButton();
+  await umbracoUi.userGroup.clickConfirmToDeleteButtonAndWaitForUserGroupToBeDeleted();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesNameExist(userGroupName)).toBeFalsy();
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.isUserGroupWithNameVisible(userGroupName, false);
+});
+
+test('can add a section to a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.addSectionWithNameToUserGroup('Content');
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.doesUserGroupTableHaveSection(userGroupName, 'Content Section');
+})
+
+test('can add multiple sections to a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createSimpleUserGroupWithContentSection(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.addSectionWithNameToUserGroup('Media');
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.doesUserGroupTableHaveSection(userGroupName, 'Content Section');
+  await umbracoUi.userGroup.doesUserGroupTableHaveSection(userGroupName, 'Media Section');
+});
+
+test('can remove a section from a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createSimpleUserGroupWithContentSection(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickRemoveSectionFromUserGroup('Content');
+  await umbracoUi.userGroup.clickConfirmRemoveButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.doesUserGroupTableHaveSection(userGroupName, 'Content', false);
+  const userGroupData = await umbracoApi.userGroup.getByName(userGroupName);
+  expect(userGroupData.sections).toEqual([]);
+});
+
+test('can add a language to a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.addLanguageToUserGroup(englishLanguage);
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.reloadPage();
+  await umbracoUi.userGroup.doesUserGroupContainLanguage(englishLanguage);
+  expect(await umbracoApi.userGroup.doesUserGroupContainLanguage(userGroupName, 'en-US')).toBeTruthy();
+})
+
+test('can enable all languages for a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickAllowAccessToAllLanguages();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainAccessToAllLanguages(userGroupName)).toBeTruthy();
+})
+
+test('can add multiple languages to a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createUserGroupWithLanguage(userGroupName, 'en-US');
+  const danishLanguage = 'Danish';
+  await umbracoApi.language.ensureNameNotExists(danishLanguage);
+  await umbracoApi.language.createDanishLanguage();
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.addLanguageToUserGroup(danishLanguage);
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.reloadPage();
+  await umbracoUi.userGroup.doesUserGroupContainLanguage(englishLanguage);
+  await umbracoUi.userGroup.doesUserGroupContainLanguage(danishLanguage);
+  expect(await umbracoApi.userGroup.doesUserGroupContainLanguage(userGroupName, 'en-US')).toBeTruthy();
+  expect(await umbracoApi.userGroup.doesUserGroupContainLanguage(userGroupName, 'da')).toBeTruthy();
+
+  // Clean
+  await umbracoApi.userGroup.ensureNameNotExists(userGroupName); // Need to delete user group before deleting language
+  await umbracoApi.language.ensureNameNotExists(danishLanguage);
+})
+
+test('can remove language from a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createUserGroupWithLanguage(userGroupName, 'en-US');
+  expect(await umbracoApi.userGroup.doesUserGroupContainLanguage(userGroupName, 'en-US')).toBeTruthy();
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickRemoveLanguageFromUserGroup(englishLanguage);
+  await umbracoUi.userGroup.clickConfirmRemoveButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.reloadPage();
+  await umbracoUi.userGroup.doesUserGroupContainLanguage(englishLanguage, false);
+  expect(await umbracoApi.userGroup.doesUserGroupContainLanguage(userGroupName, 'en-US')).toBeFalsy();
+})
+
+test('can add a content start node to a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  const documentTypeName = 'TestDocumentType';
+  const documentName = 'TestDocument';
+  await umbracoApi.documentType.ensureNameNotExists(documentTypeName);
+  const documentTypeId = await umbracoApi.documentType.createDefaultDocumentTypeWithAllowAsRoot(documentTypeName);
+  const documentId = await umbracoApi.document.createDefaultDocument(documentName, documentTypeId);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickChooseContentStartNodeButton();
+  await umbracoUi.userGroup.clickLabelWithName(documentName);
+  await umbracoUi.userGroup.clickChooseContainerButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainContentStartNodeId(userGroupName, documentId)).toBeTruthy();
+
+  // Clean
+  await umbracoApi.documentType.ensureNameNotExists(documentTypeName);
+});
+
+test('can remove a content start node from a user group ', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  const documentTypeName = 'TestDocumentType';
+  const documentName = 'TestDocument';
+  await umbracoApi.documentType.ensureNameNotExists(documentTypeName);
+  const documentTypeId = await umbracoApi.documentType.createDefaultDocumentTypeWithAllowAsRoot(documentTypeName);
+  const documentId = await umbracoApi.document.createDefaultDocument(documentName, documentTypeId);
+  await umbracoApi.userGroup.createUserGroupWithDocumentStartNode(userGroupName, documentId);
+  expect(await umbracoApi.userGroup.doesUserGroupContainContentStartNodeId(userGroupName, documentId)).toBeTruthy();
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickRemoveContentStartNodeFromUserGroup(documentName);
+  await umbracoUi.userGroup.clickConfirmRemoveButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainContentStartNodeId(userGroupName, documentId)).toBeFalsy();
+
+  // Clean
+  await umbracoApi.document.ensureNameNotExists(documentTypeName);
+});
+
+test('can enable access to all content from a user group ', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickAllowAccessToAllDocuments();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainDocumentRootAccess(userGroupName)).toBeTruthy();
+});
+
+test('cannot add a media file as a media start node to a user group', {tag: '@release'}, async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  const mediaName = 'TestMedia';
+  await umbracoApi.media.ensureNameNotExists(mediaName);
+  await umbracoApi.media.createDefaultMediaFile(mediaName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickChooseMediaStartNodeButton();
+
+  // Assert
+  await umbracoUi.userGroup.isMediaCardItemWithNameDisabled(mediaName);
+  await umbracoUi.userGroup.isSelectCheckboxVisibleForMediaName(mediaName, false);
+
+  // Clean
+  await umbracoApi.media.ensureNameNotExists(mediaName);
+});
+
+test('can add a media folder as a media start node to a user group', {tag: '@release'}, async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  const mediaFolderName = 'TestMediaFolder';
+  await umbracoApi.media.ensureNameNotExists(mediaFolderName);
+  const mediaFolderId = await umbracoApi.media.createDefaultMediaFolder(mediaFolderName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickChooseMediaStartNodeButton();
+  await umbracoUi.userGroup.selectMediaWithName(mediaFolderName);
+  await umbracoUi.userGroup.clickChooseModalButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainMediaStartNodeId(userGroupName, mediaFolderId)).toBeTruthy();
+
+  // Clean
+  await umbracoApi.media.ensureNameNotExists(mediaFolderName);
+});
+
+test('can remove a media folder start node from a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  const mediaFolderName = 'TestMediaFolder';
+  await umbracoApi.media.ensureNameNotExists(mediaFolderName);
+  const mediaFolderId = await umbracoApi.media.createDefaultMediaFolder(mediaFolderName);
+  await umbracoApi.userGroup.createUserGroupWithMediaStartNode(userGroupName, mediaFolderId);
+  expect(await umbracoApi.userGroup.doesUserGroupContainMediaStartNodeId(userGroupName, mediaFolderId)).toBeTruthy();
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickRemoveMediaStartNodeFromUserGroup(mediaFolderName);
+  await umbracoUi.userGroup.clickConfirmRemoveButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainMediaStartNodeId(userGroupName, mediaFolderId)).toBeFalsy();
+
+  // Clean
+  await umbracoApi.media.ensureNameNotExists(mediaFolderName);
+});
+
+test('can add a nested media folder as a media start node to a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  const parentFolderName = 'ParentMediaFolder';
+  const childFolderName = 'ChildMediaFolder';
+  await umbracoApi.media.ensureNameNotExists(parentFolderName);
+  const parentFolderId = await umbracoApi.media.createDefaultMediaFolder(parentFolderName);
+  const childFolderId = await umbracoApi.media.createDefaultMediaFolderAndParentId(childFolderName, parentFolderId);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickChooseMediaStartNodeButton();
+  await umbracoUi.userGroup.clickMediaWithName(parentFolderName);
+  await umbracoUi.userGroup.selectMediaWithName(childFolderName);
+  await umbracoUi.userGroup.clickChooseModalButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainMediaStartNodeId(userGroupName, childFolderId)).toBeTruthy();
+
+  // Clean
+  await umbracoApi.media.ensureNameNotExists(parentFolderName);
+});
+
+test('can enable access to all media in a user group ', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickAllowAccessToAllMedia();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainMediaRootAccess(userGroupName)).toBeTruthy();
+});
+
+test('can enable all permissions for a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+  await umbracoUi.userGroup.clickDocumentPermissionsByName(allPermissions.uiDocumentPermission);
+  await umbracoUi.userGroup.clickElementPermissionsByName(allPermissions.uiElementPermission);
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.reloadPage();
+  await umbracoUi.userGroup.doesUserGroupHaveDocumentPermissionEnabled(allPermissions.uiDocumentPermission);
+  await umbracoUi.userGroup.doesUserGroupHaveElementPermissionEnabled(allPermissions.uiElementPermission);
+  const userGroupData = await umbracoApi.userGroup.getByName(userGroupName);
+  const allFallbackPermissions = [...allPermissions.verbDocumentPermission, ...allPermissions.verbElementPermission];
+  expect(userGroupData.fallbackPermissions).toEqual(allFallbackPermissions);
+});
+
+test('can add granular permission to a specific document for a user group', {tag: '@release'}, async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  const documentTypeName = 'TestDocumentType';
+  const documentName = 'TestDocument';
+  await umbracoApi.documentType.ensureNameNotExists(documentTypeName);
+  const documentTypeId = await umbracoApi.documentType.createDefaultDocumentTypeWithAllowAsRoot(documentTypeName);
+  const documentId = await umbracoApi.document.createDefaultDocument(documentName, documentTypeId);
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickAddGranularPermission();
+  await umbracoUi.userGroup.clickLabelWithName(documentName);
+  await umbracoUi.userGroup.clickGranularPermissionsByName([allPermissions.uiDocumentPermission[0]]);
+  await umbracoUi.userGroup.clickConfirmButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainGranularPermissionsForDocument(userGroupName, documentId, [allPermissions.verbDocumentPermission[0]])).toBeTruthy();
+
+  // Clean
+  await umbracoApi.document.ensureNameNotExists(documentTypeName);
+});
+
+test('can add all granular permissions to a specific document for a user group', {tag: '@release'}, async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  const documentTypeName = 'TestDocumentType';
+  const documentName = 'TestDocument';
+  await umbracoApi.documentType.ensureNameNotExists(documentTypeName);
+  const documentTypeId = await umbracoApi.documentType.createDefaultDocumentTypeWithAllowAsRoot(documentTypeName);
+  const documentId = await umbracoApi.document.createDefaultDocument(documentName, documentTypeId);
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickAddGranularPermission();
+  await umbracoUi.userGroup.clickLabelWithName(documentName);
+  await umbracoUi.userGroup.clickGranularPermissionsByName(allPermissions.uiDocumentPermission);
+  await umbracoUi.userGroup.clickConfirmButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  await umbracoUi.reloadPage();
+  await umbracoUi.userGroup.clickGranularPermissionWithName(documentName);
+  await umbracoUi.userGroup.doesUserGroupHaveDocumentPermissionEnabled(allPermissions.uiDocumentPermission);
+  expect(await umbracoApi.userGroup.doesUserGroupContainGranularPermissionsForDocument(userGroupName, documentId, allPermissions.verbDocumentPermission)).toBeTruthy();
+
+  // Clean
+  await umbracoApi.document.ensureNameNotExists(documentTypeName);
+});
+
+test('can remove granular permission to a specific document for a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  const documentTypeName = 'TestDocumentType';
+  const documentName = 'TestDocument';
+  await umbracoApi.documentType.ensureNameNotExists(documentTypeName);
+  const documentTypeId = await umbracoApi.documentType.createDefaultDocumentTypeWithAllowAsRoot(documentTypeName);
+  const documentId = await umbracoApi.document.createDefaultDocument(documentName, documentTypeId);
+  await umbracoApi.userGroup.createUserGroupWithPermissionsForSpecificDocumentWithRead(userGroupName, documentId);
+  expect(await umbracoApi.userGroup.doesUserGroupContainGranularPermissionsForDocument(userGroupName, documentId, [allPermissions.verbDocumentPermission[0]])).toBeTruthy();
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickRemoveGranularPermissionWithName(documentName);
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainGranularPermissionsForDocument(userGroupName, documentId, [allPermissions.verbDocumentPermission[0]])).toBeFalsy();
+
+  // Clean
+  await umbracoApi.document.ensureNameNotExists(documentTypeName);
+});
+
+// Currently element start nodes are not working correctly
+test.fixme('can add an element start node to a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  const elementFolderName = 'TestElementFolder';
+  const elementFolderId = await umbracoApi.element.createDefaultElementFolder(elementFolderName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickChooseElementStartNodeButton();
+  await umbracoUi.userGroup.clickLabelWithName(elementFolderName);
+  await umbracoUi.userGroup.clickChooseContainerButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainElementStartNodeId(userGroupName, elementFolderId)).toBeTruthy();
+
+  // Clean
+  await umbracoApi.element.ensureNameNotExists(elementFolderName);
+});
+
+// Currently element start nodes are not working correctly
+test.fixme('can remove an element start node from a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  const elementFolderName = 'TestElementFolder';
+  const elementFolderId = await umbracoApi.element.createDefaultElementFolder(elementFolderName);
+  await umbracoApi.userGroup.createUserGroupWithElementStartNode(userGroupName, elementFolderId);
+  expect(await umbracoApi.userGroup.doesUserGroupContainElementStartNodeId(userGroupName, elementFolderId)).toBeTruthy();
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickRemoveButtonForElementNodeWithName(elementFolderName);
+  await umbracoUi.userGroup.clickConfirmRemoveButton();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainElementStartNodeId(userGroupName, elementFolderId)).toBeFalsy();
+
+  // Clean
+  await umbracoApi.element.ensureNameNotExists(elementFolderName);
+});
+
+test('can enable access to all elements in a user group', async ({umbracoApi, umbracoUi}) => {
+  // Arrange
+  await umbracoApi.userGroup.createEmptyUserGroup(userGroupName);
+  await umbracoUi.userGroup.clickUserGroupsButton();
+  await umbracoUi.userGroup.clickUserGroupWithName(userGroupName);
+
+  // Act
+  await umbracoUi.userGroup.clickAllowAccessToAllElements();
+  await umbracoUi.userGroup.clickSaveButtonAndWaitForUserGroupToBeUpdated();
+
+  // Assert
+  expect(await umbracoApi.userGroup.doesUserGroupContainElementRootAccess(userGroupName)).toBeTruthy();
+});

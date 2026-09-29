@@ -1,0 +1,34 @@
+steps:
+  # The Microsoft-hosted Linux agents can run low on disk space, which causes the cache
+  # save step below to fail while writing its archive. The pre-installed Android SDK is
+  # unused by any Umbraco job, so removing it reclaims the space.
+  - bash: |
+      df -h /
+      sudo rm -rf /usr/local/lib/android
+      df -h /
+    displayName: Free up disk space
+    condition: eq(variables['Agent.OS'], 'Linux')
+
+  - task: NodeTool@0
+    displayName: Use Node.js
+    retryCountOnTaskFailure: 3
+    inputs:
+      versionSource: 'fromFile'
+      versionFilePath: src/Umbraco.Web.UI.Client/.nvmrc
+
+  - template: set-npm-version.yml
+    parameters:
+      workingDirectory: src/Umbraco.Web.UI.Client
+
+  - task: Cache@2
+    displayName: Cache node_modules
+    inputs:
+      key: '"npm_client" | "$(Agent.OS)"| $(Build.SourcesDirectory)/src/Umbraco.Web.UI.Client/package-lock.json'
+      restoreKeys: |
+        "npm_client" | "$(Agent.OS)"
+        "npm_client"
+      path: $(npm_config_cache)
+
+  - script: npm ci --no-fund --no-audit --prefer-offline
+    displayName: Run npm ci (Bellissima)
+    workingDirectory: src/Umbraco.Web.UI.Client

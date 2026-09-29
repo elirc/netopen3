@@ -1,0 +1,284 @@
+// Copyright (c) Umbraco.
+// See LICENSE for more details.
+
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using NUnit.Framework;
+using Umbraco.Cms.Core;
+using Umbraco.Cms.Core.Logging;
+using Umbraco.Cms.Core.Models;
+using Umbraco.Cms.Core.Persistence.Repositories;
+using Umbraco.Cms.Core.Services;
+using Umbraco.Cms.Infrastructure.Persistence.Repositories.Implement;
+using Umbraco.Cms.Tests.Common.Attributes;
+using Umbraco.Cms.Tests.Common.Builders;
+using Umbraco.Cms.Tests.Common.TestHelpers.Stubs;
+using Umbraco.Cms.Tests.Common.Testing;
+using Umbraco.Cms.Tests.Integration.Testing;
+
+namespace Umbraco.Cms.Tests.Integration.Umbraco.Infrastructure.Services;
+
+[TestFixture]
+[UmbracoTest(Database = UmbracoTestOptions.Database.NewSchemaPerTest)]
+internal sealed class ContentServicePerformanceTest : UmbracoIntegrationTest
+{
+    [SetUp]
+    public async Task SetUpData() => await CreateTestDataAsync();
+
+    private DocumentRepository DocumentRepository => (DocumentRepository)GetRequiredService<IDocumentRepository>();
+
+    private ITemplateService TemplateService => GetRequiredService<ITemplateService>();
+
+    private IContentTypeService ContentTypeService => GetRequiredService<IContentTypeService>();
+
+    private IContentService ContentService => GetRequiredService<IContentService>();
+
+    private IContentType ContentType { get; set; }
+
+    [Test]
+    public void Profiler() => Assert.IsInstanceOf<TestProfiler>(GetRequiredService<IProfiler>());
+
+    private static IProfilingLogger GetTestProfilingLogger()
+    {
+        var profiler = new TestProfiler();
+        return new ProfilingLogger(new NullLogger<ProfilingLogger>(), profiler);
+    }
+
+    [Test]
+    [LongRunning]
+    public async Task Retrieving_All_Content_In_Site()
+    {
+        // NOTE: Doing this the old 1 by 1 way and based on the results of the ContentServicePerformanceTest.Retrieving_All_Content_In_Site
+        // the old way takes 143795ms, the new above way takes:
+        // 14249ms
+        //
+        // ... NOPE, made some new changes, it is now....
+        // 5290ms  !!!!!!
+        //
+        // that is a 96% savings of processing and sql calls!
+        //
+        // ... NOPE, made even more nice changes, it is now...
+        // 4452ms !!!!!!!
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var contentType1 = ContentTypeBuilder.CreateTextPageContentType("test1", "test1", template.Id);
+        var contentType2 = ContentTypeBuilder.CreateTextPageContentType("test2", "test2", template.Id);
+        var contentType3 = ContentTypeBuilder.CreateTextPageContentType("test3", "test3", template.Id);
+        foreach (var ct in new[] { contentType1, contentType2, contentType3 })
+        {
+            await ContentTypeService.CreateAsync(ct, Constants.Security.SuperUserKey);
+        }
+        contentType1.AllowedContentTypes = new[]
+        {
+            new ContentTypeSort(contentType2.Key, 0, contentType2.Alias),
+            new ContentTypeSort(contentType3.Key, 1, contentType3.Alias)
+        };
+        contentType2.AllowedContentTypes = new[]
+        {
+            new ContentTypeSort(contentType1.Key, 0, contentType1.Alias),
+            new ContentTypeSort(contentType3.Key, 1, contentType3.Alias)
+        };
+        contentType3.AllowedContentTypes = new[]
+        {
+            new ContentTypeSort(contentType1.Key, 0, contentType1.Alias),
+            new ContentTypeSort(contentType2.Key, 1, contentType2.Alias)
+        };
+        foreach (var ct in new[] { contentType1, contentType2, contentType3 })
+        {
+            await ContentTypeService.UpdateAsync(ct, Constants.Security.SuperUserKey);
+        }
+
+        var roots = ContentBuilder.CreateTextpageContent(contentType1, -1, 10);
+        ContentService.Save(roots);
+        foreach (var root in roots)
+        {
+            var item1 = ContentBuilder.CreateTextpageContent(contentType1, root.Id, 10);
+            var item2 = ContentBuilder.CreateTextpageContent(contentType2, root.Id, 10);
+            var item3 = ContentBuilder.CreateTextpageContent(contentType3, root.Id, 10);
+
+            ContentService.Save(item1.Concat(item2).Concat(item3));
+        }
+
+        var total = new List<IContent>();
+
+        using (GetTestProfilingLogger().TraceDuration<ContentServicePerformanceTest>("Getting all content in site"))
+        {
+            TestProfiler.Enable();
+            total.AddRange(ContentService.GetRootContent());
+            foreach (var content in total.ToArray())
+            {
+                total.AddRange(ContentService.GetPagedDescendants(content.Id, 0, int.MaxValue, out var _));
+            }
+
+            TestProfiler.Disable();
+            StaticApplicationLogging.Logger.LogInformation("Returned {Total} items", total.Count);
+        }
+    }
+
+    [Test]
+    [LongRunning]
+    public void Creating_100_Items()
+    {
+        // Arrange
+        var contentType = ContentTypeService.Get(ContentType.Id);
+        var pages = ContentBuilder.CreateTextpageContent(contentType, -1, 100);
+
+        // Act
+        var watch = Stopwatch.StartNew();
+        ContentService.Save(pages, -1);
+        watch.Stop();
+        var elapsed = watch.ElapsedMilliseconds;
+
+        Debug.Print("100 content items saved in {0} ms", elapsed);
+
+        // Assert
+        Assert.That(pages.Any(x => x.HasIdentity == false), Is.False);
+    }
+
+    [Test]
+    [LongRunning]
+    public void Creating_1000_Items()
+    {
+        // Arrange
+        var contentType = ContentTypeService.Get(ContentType.Id);
+        var pages = ContentBuilder.CreateTextpageContent(contentType, -1, 1000);
+
+        // Act
+        var watch = Stopwatch.StartNew();
+        ContentService.Save(pages, -1);
+        watch.Stop();
+        var elapsed = watch.ElapsedMilliseconds;
+
+        Debug.Print("100 content items saved in {0} ms", elapsed);
+
+        // Assert
+        Assert.That(pages.Any(x => x.HasIdentity == false), Is.False);
+    }
+
+    [Test]
+    [LongRunning]
+    public void Getting_100_Uncached_Items()
+    {
+        // Arrange
+        var contentType = ContentTypeService.Get(ContentType.Id);
+        var pages = ContentBuilder.CreateTextpageContent(contentType, -1, 100);
+        ContentService.Save(pages, -1);
+
+        var provider = ScopeProvider;
+        using (var scope = provider.CreateScope())
+        {
+            var repository = DocumentRepository;
+
+            // Act
+            var watch = Stopwatch.StartNew();
+            var contents = repository.GetMany();
+            watch.Stop();
+            var elapsed = watch.ElapsedMilliseconds;
+
+            Debug.Print("100 content items retrieved in {0} ms without caching", elapsed);
+
+            // Assert
+            Assert.That(contents.Any(x => x.HasIdentity == false), Is.False);
+            Assert.That(contents.Any(x => x == null), Is.False);
+        }
+    }
+
+    [Test]
+    [LongRunning]
+    public void Getting_1000_Uncached_Items()
+    {
+        // Arrange
+        var contentType = ContentTypeService.Get(ContentType.Id);
+        var pages = ContentBuilder.CreateTextpageContent(contentType, -1, 1000);
+        ContentService.Save(pages, -1);
+
+        using (var scope = ScopeProvider.CreateScope())
+        {
+            var repository = DocumentRepository;
+
+            // Act
+            var watch = Stopwatch.StartNew();
+            var contents = repository.GetMany();
+            watch.Stop();
+            var elapsed = watch.ElapsedMilliseconds;
+
+            Debug.Print("1000 content items retrieved in {0} ms without caching", elapsed);
+
+            // Assert
+            // Assert.That(contents.Any(x => x.HasIdentity == false), Is.False);
+            // Assert.That(contents.Any(x => x == null), Is.False);
+        }
+    }
+
+    [Test]
+    [LongRunning]
+    public void Getting_100_Cached_Items()
+    {
+        // Arrange
+        var contentType = ContentTypeService.Get(ContentType.Id);
+        var pages = ContentBuilder.CreateTextpageContent(contentType, -1, 100);
+        ContentService.Save(pages, -1);
+
+        using (var scope = ScopeProvider.CreateScope())
+        {
+            var repository = DocumentRepository;
+
+            // Act
+            var contents = repository.GetMany();
+
+            var watch = Stopwatch.StartNew();
+            var contentsCached = repository.GetMany();
+            watch.Stop();
+            var elapsed = watch.ElapsedMilliseconds;
+
+            Debug.Print("100 content items retrieved in {0} ms with caching", elapsed);
+
+            // Assert
+            Assert.That(contentsCached.Any(x => x.HasIdentity == false), Is.False);
+            Assert.That(contentsCached.Any(x => x == null), Is.False);
+            Assert.That(contentsCached.Count(), Is.EqualTo(contents.Count()));
+        }
+    }
+
+    [Test]
+    [LongRunning]
+    public void Getting_1000_Cached_Items()
+    {
+        // Arrange
+        var contentType = ContentTypeService.Get(ContentType.Id);
+        var pages = ContentBuilder.CreateTextpageContent(contentType, -1, 1000);
+        ContentService.Save(pages, -1);
+
+        using (var scope = ScopeProvider.CreateScope())
+        {
+            var repository = DocumentRepository;
+
+            // Act
+            var contents = repository.GetMany();
+
+            var watch = Stopwatch.StartNew();
+            var contentsCached = repository.GetMany();
+            watch.Stop();
+            var elapsed = watch.ElapsedMilliseconds;
+
+            Debug.Print("1000 content items retrieved in {0} ms with caching", elapsed);
+
+            // Assert
+            // Assert.That(contentsCached.Any(x => x.HasIdentity == false), Is.False);
+            // Assert.That(contentsCached.Any(x => x == null), Is.False);
+            // Assert.That(contentsCached.Count(), Is.EqualTo(contents.Count()));
+        }
+    }
+
+    public async Task CreateTestDataAsync()
+    {
+        var template = TemplateBuilder.CreateTextPageTemplate("defaultTemplate");
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        // Create and Save ContentType "textpage" -> ContentType.Id
+        ContentType = ContentTypeBuilder.CreateTextPageContentType(defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(ContentType, Constants.Security.SuperUserKey);
+    }
+}

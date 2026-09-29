@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json.schemastore.org/template.json",
+  "author": "Umbraco HQ",
+  "classifications": [
+    "Web",
+    "CMS",
+    "Umbraco",
+    "Extension",
+    "Plugin",
+    "Razor Class Library"
+  ],
+  "name": "Umbraco Extension",
+  "description": "A Razor Class Library project for building Umbraco extensions.",
+  "groupIdentity": "Umbraco.Templates.UmbracoExtension",
+  "identity": "Umbraco.Templates.UmbracoExtension",
+  "shortName": "umbraco-extension",
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "sourceName": "Umbraco.Extension",
+  "defaultName": "Umbraco.Extension",
+  "preferNameDirectory": true,
+  "symbols": {
+    "UmbracoVersion": {
+      "displayName": "Umbraco version",
+      "description": "The version of Umbraco.Cms to add as PackageReference. By default it installs the latest non pre-release version",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "*",
+      "replaces": "UMBRACO_VERSION_FROM_TEMPLATE"
+    },
+    "PackageManagement": {
+      "type": "parameter",
+      "datatype": "choice",
+      "defaultValue": "Central",
+      "displayName": "Package Version Management",
+      "description": "Choose how to manage NuGet package versions",
+      "choices": [
+        {
+          "choice": "Central",
+          "displayName": "Central package management",
+          "description": "Use Directory.Packages.props (recommended for new standalone projects)"
+        },
+        {
+          "choice": "PerProject",
+          "displayName": "Per project",
+          "description": "Use versions in .csproj (recommended when adding to existing projects)"
+        }
+      ]
+    },
+    "UseCPM": {
+      "type": "computed",
+      "value": "(PackageManagement == \"Central\")"
+    },
+    "SkipRestore": {
+      "displayName": "Skip restore",
+      "description": "If specified, skips the automatic restore of the project on create.",
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false"
+    },
+    "SupportPagesAndViews": {
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false",
+      "displayName": "Support pages and views",
+      "description": "Whether to support adding traditional Razor pages and Views to this library."
+    },
+    "KebabCasedName": {
+      "type": "derived",
+      "valueSource": "name",
+      "replaces": "umbraco-extension",
+      "fileRename": "umbraco-extension",
+      "valueTransform": "kebabCase"
+    },
+    "SafeName": {
+      "type": "derived",
+      "valueSource": "name",
+      "valueTransform": "safe_namespace"
+    },
+    "SafeCleanName": {
+      "type": "derived",
+      "valueSource": "SafeName",
+      "replaces": "UmbracoExtension",
+      "fileRename": "UmbracoExtension",
+      "valueTransform": "removePunctuation"
+    },
+    "SafeCleanNameLower": {
+      "type": "derived",
+      "valueSource": "SafeCleanName",
+      "replaces": "umbracoextension",
+      "fileRename": "umbracoextension",
+      "valueTransform": "lowerCase"
+    },
+    "SafeCleanNameFriendly": {
+      "type": "derived",
+      "valueSource": "SafeCleanName",
+      "replaces": "Umbraco Extension",
+      "valueTransform": "pascalCaseToSpaces"
+    },
+    "IncludeExample": {
+      "displayName": "Include Example Code",
+      "description": "Whether to include an example dashboard and other code to get started with.",
+      "type": "parameter",
+      "datatype": "bool",
+      "defaultValue": "false"
+    },
+    "SiteDomain": {
+      "displayName": "Site Domain",
+      "description": "If using the --include-example then you can supply the domain prefix such as 'https://localhost:5000' to communicate with the Umbraco website for generating the TypeScript OpenAPI client",
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "https://localhost:5000",
+      "replaces": "https://localhost:44339"
+    }
+  },
+  "forms": {
+    "removePunctuation": {
+      "identifier": "replace",
+      "pattern": "[\\._]",
+      "replacement": ""
+    },
+    "pascalCaseToSpaces": {
+      "identifier": "replace",
+      "pattern": "([A-Z][a-z]+)",
+      "replacement": "$1 "
+    }
+  },
+  "primaryOutputs": [
+    {
+      "path": "Umbraco.Extension.csproj"
+    }
+  ],
+  "postActions": [
+    {
+      "id": "restore",
+      "condition": "(!SkipRestore)",
+      "description": "Restore NuGet packages required by this project.",
+      "manualInstructions": [
+        {
+          "text": "Run 'dotnet restore'"
+        }
+      ],
+      "actionId": "210D431B-A78B-4D2F-B762-4ED3E3EA9025",
+      "continueOnError": true
+    }
+  ],
+  "sources": [
+    {
+      "modifiers": [
+        {
+          "condition": "(!IncludeExample)",
+          "exclude": [
+            "[Cc]lient/src/dashboards/**",
+            "ViewModels/**"
+          ]
+        },
+        {
+          "condition": "(!UseCPM)",
+          "exclude": [
+            "Directory.Packages.props"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,2732 @@
+// Copyright (c) Umbraco.
+// See LICENSE for more details.
+
+using NUnit.Framework;
+using Umbraco.Cms.Core;
+using Umbraco.Cms.Core.Events;
+using Umbraco.Cms.Core.Exceptions;
+using Umbraco.Cms.Core.Models;
+using Umbraco.Cms.Core.Notifications;
+using Umbraco.Cms.Core.Services;
+using Umbraco.Cms.Core.Services.OperationStatus;
+using Umbraco.Cms.Tests.Common.Attributes;
+using Umbraco.Cms.Tests.Common.Builders;
+using Umbraco.Cms.Tests.Common.Testing;
+using Umbraco.Cms.Tests.Integration.Testing;
+
+namespace Umbraco.Cms.Tests.Integration.Umbraco.Infrastructure.Services;
+
+[TestFixture]
+[UmbracoTest(Database = UmbracoTestOptions.Database.NewSchemaPerTest, PublishedRepositoryEvents = true)]
+internal sealed partial class ContentTypeServiceTests : UmbracoIntegrationTest
+{
+    private ITemplateService TemplateService => GetRequiredService<ITemplateService>();
+
+    private IContentTypeContainerService ContentTypeContainerService => GetRequiredService<IContentTypeContainerService>();
+
+    private ContentService ContentService => (ContentService)GetRequiredService<IContentService>();
+
+    private IDataTypeService DataTypeService => GetRequiredService<IDataTypeService>();
+
+    private ContentTypeService ContentTypeService => (ContentTypeService)GetRequiredService<IContentTypeService>();
+
+    private IMediaTypeService MediaTypeService => GetRequiredService<IMediaTypeService>();
+
+    private IMemberTypeService MemberTypeService => GetRequiredService<IMemberTypeService>();
+
+    protected override void CustomTestSetup(IUmbracoBuilder builder)
+    {
+        builder.AddNotificationHandler<ContentMovedToRecycleBinNotification, ContentNotificationHandler>();
+        builder.AddNotificationHandler<ContentTypeDeletedNotification, ContentTypeNotificationHandler>();
+        builder.AddNotificationHandler<ContentTypeDeletingNotification, ContentTypeDeletingNotificationHandler>();
+    }
+
+    [Test]
+    public async Task CanSaveAndGetIsElement()
+    {
+        // create content type with a property type that varies by culture
+        IContentType contentType = ContentTypeBuilder.CreateBasicContentType();
+        contentType.Variations = ContentVariation.Nothing;
+        var contentCollection = new PropertyTypeCollection(true)
+        {
+            new PropertyType(ShortStringHelper, "test", ValueStorageType.Ntext)
+            {
+                Alias = "title",
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88,
+                Variations = ContentVariation.Nothing
+            }
+        };
+        contentType.PropertyGroups.Add(new PropertyGroup(contentCollection)
+        {
+            Alias = "content",
+            Name = "Content",
+            SortOrder = 1
+        });
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        contentType = ContentTypeService.Get(contentType.Id);
+        Assert.IsFalse(contentType.IsElement);
+
+        contentType.IsElement = true;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        contentType = ContentTypeService.Get(contentType.Id);
+        Assert.IsTrue(contentType.IsElement);
+    }
+
+    [Test]
+    [LongRunning]
+    public async Task Deleting_Content_Type_With_Hierarchy_Of_Content_Items_Moves_Orphaned_Content_To_Recycle_Bin()
+    {
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        IContentType contentType1 =
+            ContentTypeBuilder.CreateSimpleContentType("test1", "Test1", defaultTemplateId: template.Id);
+        await TemplateService.CreateAsync(contentType1.DefaultTemplate, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(contentType1, Constants.Security.SuperUserKey);
+        IContentType contentType2 =
+            ContentTypeBuilder.CreateSimpleContentType("test2", "Test2", defaultTemplateId: template.Id);
+        await TemplateService.CreateAsync(contentType2.DefaultTemplate, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+        IContentType contentType3 =
+            ContentTypeBuilder.CreateSimpleContentType("test3", "Test3", defaultTemplateId: template.Id);
+        await TemplateService.CreateAsync(contentType3.DefaultTemplate, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(contentType3, Constants.Security.SuperUserKey);
+
+        IContentType[] contentTypes = { contentType1, contentType2, contentType3 };
+        var parentId = -1;
+
+        var ids = new List<int>();
+
+        for (var i = 0; i < 2; i++)
+        {
+            for (var index = 0; index < contentTypes.Length; index++)
+            {
+                var contentType = contentTypes[index];
+                var contentItem =
+                    ContentBuilder.CreateSimpleContent(contentType, "MyName_" + index + "_" + i, parentId);
+                ContentService.Save(contentItem);
+                ContentService.Publish(contentItem, new[] { "*" });
+                parentId = contentItem.Id;
+
+                ids.Add(contentItem.Id);
+            }
+        }
+
+        // delete the first content type, all other content of different content types should be in the recycle bin
+        ContentTypeService.Delete(contentTypes[0]);
+
+        var found = ContentService.GetByIds(ids);
+
+        Assert.AreEqual(4, found.Count());
+        foreach (var content in found)
+        {
+            Assert.IsTrue(content.Trashed);
+        }
+    }
+
+    [Test]
+    [LongRunning]
+    public async Task Deleting_Content_Types_With_Hierarchy_Of_Content_Items_Doesnt_Raise_Trashed_Event_For_Deleted_Items_1()
+    {
+        ContentNotificationHandler.MovedContentToRecycleBin = MovedContentToRecycleBin;
+
+        try
+        {
+            var template = TemplateBuilder.CreateTextPageTemplate();
+            await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+            IContentType contentType1 =
+                ContentTypeBuilder.CreateSimpleContentType("test1", "Test1", defaultTemplateId: template.Id);
+            await TemplateService.CreateAsync(contentType1.DefaultTemplate, Constants.Security.SuperUserKey);
+            await ContentTypeService.CreateAsync(contentType1, Constants.Security.SuperUserKey);
+            IContentType contentType2 =
+                ContentTypeBuilder.CreateSimpleContentType("test2", "Test2", defaultTemplateId: template.Id);
+            await TemplateService.CreateAsync(contentType2.DefaultTemplate, Constants.Security.SuperUserKey);
+            await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+            IContentType contentType3 =
+                ContentTypeBuilder.CreateSimpleContentType("test3", "Test3", defaultTemplateId: template.Id);
+            await TemplateService.CreateAsync(contentType3.DefaultTemplate, Constants.Security.SuperUserKey);
+            await ContentTypeService.CreateAsync(contentType3, Constants.Security.SuperUserKey);
+
+            IContentType[] contentTypes = { contentType1, contentType2, contentType3 };
+            var parentId = -1;
+
+            for (var i = 0; i < 2; i++)
+            {
+                for (var index = 0; index < contentTypes.Length; index++)
+                {
+                    var contentType = contentTypes[index];
+                    var contentItem =
+                        ContentBuilder.CreateSimpleContent(contentType, "MyName_" + index + "_" + i, parentId);
+                    ContentService.Save(contentItem);
+                    ContentService.Publish(contentItem, new[] { "*" });
+                    parentId = contentItem.Id;
+                }
+            }
+
+            foreach (var contentType in contentTypes.Reverse())
+            {
+                ContentTypeService.Delete(contentType);
+            }
+        }
+        finally
+        {
+            ContentNotificationHandler.MovedContentToRecycleBin = null;
+        }
+    }
+
+    [Test]
+    [LongRunning]
+    public async Task Deleting_Content_Types_With_Hierarchy_Of_Content_Items_Doesnt_Raise_Trashed_Event_For_Deleted_Items_2()
+    {
+        ContentNotificationHandler.MovedContentToRecycleBin = MovedContentToRecycleBin;
+
+        try
+        {
+            var template = TemplateBuilder.CreateTextPageTemplate();
+            await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+            IContentType contentType1 =
+                ContentTypeBuilder.CreateSimpleContentType("test1", "Test1", defaultTemplateId: template.Id);
+            await TemplateService.CreateAsync(contentType1.DefaultTemplate, Constants.Security.SuperUserKey);
+            await ContentTypeService.CreateAsync(contentType1, Constants.Security.SuperUserKey);
+            IContentType contentType2 =
+                ContentTypeBuilder.CreateSimpleContentType("test2", "Test2", defaultTemplateId: template.Id);
+            await TemplateService.CreateAsync(contentType2.DefaultTemplate, Constants.Security.SuperUserKey);
+            await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+            IContentType contentType3 =
+                ContentTypeBuilder.CreateSimpleContentType("test3", "Test3", defaultTemplateId: template.Id);
+            await TemplateService.CreateAsync(contentType3.DefaultTemplate, Constants.Security.SuperUserKey);
+            await ContentTypeService.CreateAsync(contentType3, Constants.Security.SuperUserKey);
+
+            var root = ContentBuilder.CreateSimpleContent(contentType1, "Root");
+            ContentService.Save(root);
+            ContentService.Publish(root, new[] { "*" });
+
+            var level1 = ContentBuilder.CreateSimpleContent(contentType2, "L1", root.Id);
+            ContentService.Save(level1);
+            ContentService.Publish(level1, new[] { "*" });
+
+            for (var i = 0; i < 2; i++)
+            {
+                var level3 = ContentBuilder.CreateSimpleContent(contentType3, "L2" + i, level1.Id);
+                ContentService.Save(level3);
+                ContentService.Publish(level3, new[] { "*" });
+            }
+
+            ContentTypeService.Delete(contentType1);
+        }
+        finally
+        {
+            ContentNotificationHandler.MovedContentToRecycleBin = null;
+        }
+    }
+
+    private void MovedContentToRecycleBin(ContentMovedToRecycleBinNotification notification)
+    {
+        foreach (var item in notification.MoveInfoCollection)
+        {
+            // if this item doesn't exist then Fail!
+            var exists = ContentService.GetById(item.Entity.Id);
+            if (exists == null)
+            {
+                Assert.Fail("The item doesn't exist");
+            }
+        }
+    }
+
+    [Test]
+    public async Task Deleting_PropertyType_Removes_The_Property_From_Content()
+    {
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        IContentType contentType1 = ContentTypeBuilder.CreateTextPageContentType("test1", "Test1", template.Id);
+        await TemplateService.CreateAsync(contentType1.DefaultTemplate, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(contentType1, Constants.Security.SuperUserKey);
+        IContent contentItem = ContentBuilder.CreateTextpageContent(contentType1, "Testing", -1);
+        ContentService.Save(contentItem);
+        ContentService.Publish(contentItem, new[] { "*" });
+        var initProps = contentItem.Properties.Count;
+
+        // remove a property
+        contentType1.RemovePropertyType(contentType1.PropertyTypes.First().Alias);
+        await ContentTypeService.CreateAsync(contentType1, Constants.Security.SuperUserKey);
+
+        // re-load it from the db
+        contentItem = ContentService.GetById(contentItem.Id);
+
+        Assert.AreEqual(initProps - 1, contentItem.Properties.Count);
+    }
+
+    [Test]
+    public async Task Get_Descendants()
+    {
+        // Arrange
+        var contentTypeService = ContentTypeService;
+        var hierarchy = await CreateContentTypeHierarchy();
+        foreach (var item in hierarchy)
+        {
+            await contentTypeService.CreateAsync(item, Constants.Security.SuperUserKey);
+        }
+        var master = hierarchy.First();
+
+        // Act
+        var descendants = contentTypeService.GetDescendants(master.Id, false);
+
+        // Assert
+        Assert.AreEqual(10, descendants.Count());
+    }
+
+    [Test]
+    public async Task Get_Descendants_And_Self()
+    {
+        // Arrange
+        var contentTypeService = ContentTypeService;
+        var hierarchy = await CreateContentTypeHierarchy();
+        foreach (var item in hierarchy)
+        {
+            await contentTypeService.CreateAsync(item, Constants.Security.SuperUserKey);
+        }
+        var master = hierarchy.First();
+
+        // Act
+        var descendants = contentTypeService.GetDescendants(master.Id, true);
+
+        // Assert
+        Assert.AreEqual(11, descendants.Count());
+    }
+
+    [Test]
+    public async Task Can_Bulk_Save_New_Hierarchy_Content_Types()
+    {
+        // Arrange
+        var contentTypeService = ContentTypeService;
+        var hierarchy = await CreateContentTypeHierarchy();
+
+        // Act
+        foreach (var item in hierarchy)
+        {
+            await contentTypeService.CreateAsync(item, Constants.Security.SuperUserKey);
+        }
+
+        Assert.That(hierarchy.Any(), Is.True);
+        Assert.That(hierarchy.Any(x => x.HasIdentity == false), Is.False);
+
+        // all parent ids should be ok, they are lazy and if they equal zero an exception will be thrown
+        Assert.DoesNotThrow(() => hierarchy.Any(x => x.ParentId != 0));
+        for (var i = 0; i < hierarchy.Count(); i++)
+        {
+            if (i == 0)
+            {
+                continue;
+            }
+
+            Assert.AreEqual(hierarchy.ElementAt(i).ParentId, hierarchy.ElementAt(i - 1).Id);
+        }
+    }
+
+    [Test]
+    public async Task Can_Save_ContentType_Structure_And_Create_Content_Based_On_It()
+    {
+        // Arrange
+        var cs = ContentService;
+        var cts = ContentTypeService;
+        var dtdYesNo = await DataTypeService.GetAsync(Constants.DataTypes.Guids.CheckboxGuid);
+        var ctBase = new ContentType(ShortStringHelper, -1)
+        {
+            Name = "Base",
+            Alias = "Base",
+            Icon = "folder.gif",
+            Thumbnail = "folder.png"
+        };
+        ctBase.AddPropertyType(new PropertyType(ShortStringHelper, dtdYesNo, Constants.Conventions.Content.NaviHide)
+        {
+            Name = "Hide From Navigation"
+        });
+        /*,"Navigation"*/
+        await cts.CreateAsync(ctBase, Constants.Security.SuperUserKey);
+
+        const string contentTypeAlias = "HomePage";
+        var ctHomePage = new ContentType(ShortStringHelper, ctBase, contentTypeAlias)
+        {
+            Name = "Home Page",
+            Alias = contentTypeAlias,
+            Icon = "settingDomain.gif",
+            Thumbnail = "folder.png",
+            AllowedAsRoot = true
+        };
+        ctHomePage.AddPropertyType(
+            new PropertyType(ShortStringHelper, dtdYesNo, "someProperty") { Name = "Some property" });
+        /*,"Navigation"*/
+        await cts.CreateAsync(ctHomePage, Constants.Security.SuperUserKey);
+
+        // Act
+        var homeDoc = cs.Create("Home Page", -1, contentTypeAlias);
+        cs.Save(homeDoc);
+        cs.Publish(homeDoc, new[] { "*" });
+
+        // Assert
+        Assert.That(ctBase.HasIdentity, Is.True);
+        Assert.That(ctHomePage.HasIdentity, Is.True);
+        Assert.That(homeDoc.HasIdentity, Is.True);
+        Assert.That(homeDoc.ContentTypeId, Is.EqualTo(ctHomePage.Id));
+    }
+
+    [Test]
+    public async Task Create_Content_Type_Ensures_Sort_Orders()
+    {
+        var contentType = new ContentType(ShortStringHelper, -1)
+        {
+            Alias = "test",
+            Name = "Test",
+            Description = "ContentType used for simple text pages",
+            Icon = ".sprTreeDoc3",
+            Thumbnail = "doc2.png",
+            SortOrder = 1,
+            CreatorId = 0,
+            Trashed = false
+        };
+
+        contentType.AddPropertyType(
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            { Name = "Title", Description = string.Empty, Mandatory = false, DataTypeId = -88 });
+        contentType.AddPropertyType(
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.RichText,
+                ValueStorageType.Ntext,
+                "bodyText")
+            { Name = "Body Text", Description = string.Empty, Mandatory = false, DataTypeId = -87 });
+        contentType.AddPropertyType(
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            { Name = "Author", Description = "Name of the author", Mandatory = false, DataTypeId = -88 });
+
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        var sortOrders = contentType.PropertyTypes.Select(x => x.SortOrder).ToArray();
+
+        Assert.AreEqual(1, sortOrders.Count(x => x == 0));
+        Assert.AreEqual(1, sortOrders.Count(x => x == 1));
+        Assert.AreEqual(1, sortOrders.Count(x => x == 2));
+    }
+
+    [Test]
+    public async Task Can_Create_And_Save_ContentType_Composition()
+    {
+        /*
+         * Global
+         * - Components
+         * - Category
+         */
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var global = ContentTypeBuilder.CreateSimpleContentType("global", "Global", defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(global, Constants.Security.SuperUserKey);
+
+        var components = ContentTypeBuilder.CreateSimpleContentType(
+            "components",
+            "Components",
+            global,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(components, Constants.Security.SuperUserKey);
+
+        var component = ContentTypeBuilder.CreateSimpleContentType(
+            "component",
+            "Component",
+            components,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(component, Constants.Security.SuperUserKey);
+
+        var category = ContentTypeBuilder.CreateSimpleContentType(
+            "category",
+            "Category",
+            global,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(category, Constants.Security.SuperUserKey);
+
+        var success = category.AddContentType(component);
+
+        Assert.That(success, Is.False);
+    }
+
+    [Test]
+    public async Task Can_Delete_Parent_ContentType_When_Child_Has_Content()
+    {
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var contentType = ContentTypeBuilder.CreateSimpleContentType(
+            "page",
+            "Page",
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        var childContentType = ContentTypeBuilder.CreateSimpleContentType(
+            "childPage",
+            "Child Page",
+            contentType,
+            randomizeAliases: true,
+            propertyGroupAlias: "childContent",
+            propertyGroupName: "Child Content",
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(childContentType, Constants.Security.SuperUserKey);
+        var content = ContentService.Create("Page 1", -1, childContentType.Alias);
+        ContentService.Save(content);
+
+        ContentTypeService.Delete(contentType);
+
+        Assert.IsNotNull(content.Id);
+        Assert.AreNotEqual(0, content.Id);
+        Assert.IsNotNull(childContentType.Id);
+        Assert.AreNotEqual(0, childContentType.Id);
+        Assert.IsNotNull(contentType.Id);
+        Assert.AreNotEqual(0, contentType.Id);
+        var deletedContent = ContentService.GetById(content.Id);
+        var deletedChildContentType = ContentTypeService.Get(childContentType.Id);
+        var deletedContentType = ContentTypeService.Get(contentType.Id);
+
+        Assert.IsNull(deletedChildContentType);
+        Assert.IsNull(deletedContent);
+        Assert.IsNull(deletedContentType);
+    }
+
+    [Test]
+    public async Task Can_Create_Container()
+    {
+        // Act
+        var createAttempt = await ContentTypeContainerService.CreateAsync(null, "container1", null, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.IsTrue(createAttempt.Success);
+        var createdContainer = await ContentTypeContainerService.GetAsync(createAttempt.Result!.Key);
+        Assert.IsNotNull(createdContainer);
+    }
+
+    [Test]
+    public async Task Can_Get_All_Containers()
+    {
+        // Act
+        await ContentTypeContainerService.CreateAsync(null, "container1", null, Constants.Security.SuperUserKey);
+        await ContentTypeContainerService.CreateAsync(null, "container2", null, Constants.Security.SuperUserKey);
+
+        // Assert
+        var containers = await ContentTypeContainerService.GetAllAsync();
+        Assert.AreEqual(2, containers.Count());
+    }
+
+    [Test]
+    public async Task Deleting_ContentType_Sends_Correct_Number_Of_DeletedEntities_In_Events()
+    {
+        var deletedEntities = 0;
+
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var contentType = ContentTypeBuilder.CreateSimpleContentType("page", "Page", defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        ContentTypeNotificationHandler.Deleted +=
+            notification => deletedEntities += notification.DeletedEntities.Count();
+
+        ContentTypeService.Delete(contentType);
+
+        Assert.AreEqual(deletedEntities, 1);
+    }
+
+    [Test]
+    public async Task Deleting_Multiple_ContentTypes_Sends_Correct_Number_Of_DeletedEntities_In_Events()
+    {
+        var deletedEntities = 0;
+
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var contentType = ContentTypeBuilder.CreateSimpleContentType("page", "Page", defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        var contentType2 =
+            ContentTypeBuilder.CreateSimpleContentType("otherPage", "Other page", defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+
+        ContentTypeNotificationHandler.Deleted +=
+            notification => deletedEntities += notification.DeletedEntities.Count();
+
+        ContentTypeService.Delete(contentType);
+        ContentTypeService.Delete(contentType2);
+
+        Assert.AreEqual(2, deletedEntities);
+    }
+
+    [Test]
+    public async Task Deleting_ContentType_With_Child_Sends_Correct_Number_Of_DeletedEntities_In_Events()
+    {
+        var deletedEntities = 0;
+
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var contentType = ContentTypeBuilder.CreateSimpleContentType("page", "Page", defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        var contentType2 =
+            ContentTypeBuilder.CreateSimpleContentType("subPage", "Sub page", defaultTemplateId: template.Id);
+        contentType2.ParentId = contentType.Id;
+        await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+
+        ContentTypeNotificationHandler.Deleted +=
+            notification => deletedEntities += notification.DeletedEntities.Count();
+
+        ContentTypeService.Delete(contentType);
+
+        Assert.AreEqual(2, deletedEntities);
+    }
+
+    [Test]
+    public async Task DeleteAsync_Returns_CancelledByNotification_When_Notification_Handler_Cancels()
+    {
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var contentType = ContentTypeBuilder.CreateSimpleContentType("page", "Page", defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        try
+        {
+            // Enable cancellation on the deleting notification handler
+            ContentTypeDeletingNotificationHandler.CancelOperation = true;
+
+            var result = await ContentTypeService.DeleteAsync(contentType.Key, Constants.Security.SuperUserKey);
+
+            Assert.AreEqual(ContentTypeOperationStatus.CancelledByNotification, result);
+
+            // Verify the content type was NOT deleted
+            var stillExists = ContentTypeService.Get(contentType.Id);
+            Assert.IsNotNull(stillExists);
+        }
+        finally
+        {
+            ContentTypeDeletingNotificationHandler.CancelOperation = false;
+        }
+    }
+
+    [Test]
+    public async Task Can_Remove_ContentType_Composition_From_ContentType()
+    {
+        // Test for U4-2234
+        var cts = ContentTypeService;
+
+        // Arrange
+        var component = CreateComponent();
+        await cts.CreateAsync(component, Constants.Security.SuperUserKey);
+        var banner = CreateBannerComponent(component);
+        await cts.CreateAsync(banner, Constants.Security.SuperUserKey);
+        var site = CreateSite();
+        await cts.CreateAsync(site, Constants.Security.SuperUserKey);
+        var homepage = await CreateHomepage(site);
+        await cts.CreateAsync(homepage, Constants.Security.SuperUserKey);
+
+        // Add banner to homepage
+        var added = homepage.AddContentType(banner);
+        await cts.UpdateAsync(homepage, Constants.Security.SuperUserKey);
+
+        // Assert composition
+        var bannerExists = homepage.ContentTypeCompositionExists(banner.Alias);
+        var bannerPropertyExists = homepage.CompositionPropertyTypes.Any(x => x.Alias.Equals("bannerName"));
+        Assert.That(added, Is.True);
+        Assert.That(bannerExists, Is.True);
+        Assert.That(bannerPropertyExists, Is.True);
+        Assert.That(homepage.CompositionPropertyTypes.Count(), Is.EqualTo(6));
+
+        // Remove banner from homepage
+        var removed = homepage.RemoveContentType(banner.Alias);
+        await cts.UpdateAsync(homepage, Constants.Security.SuperUserKey);
+
+        // Assert composition
+        var bannerStillExists = homepage.ContentTypeCompositionExists(banner.Alias);
+        var bannerPropertyStillExists = homepage.CompositionPropertyTypes.Any(x => x.Alias.Equals("bannerName"));
+        Assert.That(removed, Is.True);
+        Assert.That(bannerStillExists, Is.False);
+        Assert.That(bannerPropertyStillExists, Is.False);
+        Assert.That(homepage.CompositionPropertyTypes.Count(), Is.EqualTo(4));
+    }
+
+    [Test]
+    public async Task Can_Copy_ContentType_By_Performing_Clone()
+    {
+        // Arrange
+        var metaContentType = ContentTypeBuilder.CreateMetaContentType();
+        await ContentTypeService.CreateAsync(metaContentType, Constants.Security.SuperUserKey);
+
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+        var simpleContentType =
+            ContentTypeBuilder.CreateSimpleContentType(
+                "category",
+                "Category",
+                metaContentType,
+                defaultTemplateId: template.Id) as IContentType;
+        await ContentTypeService.CreateAsync(simpleContentType, Constants.Security.SuperUserKey);
+        var categoryId = simpleContentType.Id;
+
+        // Act
+        var sut = simpleContentType.DeepCloneWithResetIdentities("newcategory");
+        Assert.IsNotNull(sut);
+        await ContentTypeService.CreateAsync(sut, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(sut.HasIdentity, Is.True);
+
+        var contentType = ContentTypeService.Get(sut.Id);
+        var category = ContentTypeService.Get(categoryId);
+
+        Assert.That(contentType.CompositionAliases().Any(x => x.Equals("meta")), Is.True);
+        Assert.AreEqual(contentType.ParentId, category.ParentId);
+        Assert.AreEqual(contentType.Level, category.Level);
+        Assert.AreEqual(contentType.PropertyTypes.Count(), category.PropertyTypes.Count());
+        Assert.AreNotEqual(contentType.Id, category.Id);
+        Assert.AreNotEqual(contentType.Key, category.Key);
+        Assert.AreNotEqual(contentType.Path, category.Path);
+        Assert.AreNotEqual(contentType.SortOrder, category.SortOrder);
+        Assert.AreNotEqual(
+            contentType.PropertyTypes.First(x => x.Alias.Equals("title")).Id,
+            category.PropertyTypes.First(x => x.Alias.Equals("title")).Id);
+        Assert.AreNotEqual(
+            contentType.PropertyGroups.First(x => x.Name.Equals("Content")).Id,
+            category.PropertyGroups.First(x => x.Name.Equals("Content")).Id);
+    }
+
+    [Test]
+    public async Task Can_Copy_ContentType_To_New_Parent_By_Performing_Clone()
+    {
+        // Arrange
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var parentContentType1 =
+            ContentTypeBuilder.CreateSimpleContentType("parent1", "Parent1", defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(parentContentType1, Constants.Security.SuperUserKey);
+        var parentContentType2 = ContentTypeBuilder.CreateSimpleContentType(
+            "parent2",
+            "Parent2",
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(parentContentType2, Constants.Security.SuperUserKey);
+
+        var simpleContentType = ContentTypeBuilder.CreateSimpleContentType(
+            "category",
+            "Category",
+            parentContentType1,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id) as IContentType;
+        await ContentTypeService.CreateAsync(simpleContentType, Constants.Security.SuperUserKey);
+
+        // Act
+        var clone = simpleContentType.DeepCloneWithResetIdentities("newcategory");
+        Assert.IsNotNull(clone);
+        clone.RemoveContentType("parent1");
+        clone.AddContentType(parentContentType2);
+        clone.ParentId = parentContentType2.Id;
+        await ContentTypeService.CreateAsync(clone, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(clone.HasIdentity, Is.True);
+
+        var clonedContentType = ContentTypeService.Get(clone.Id);
+        var originalContentType = ContentTypeService.Get(simpleContentType.Id);
+
+        Assert.That(clonedContentType.CompositionAliases().Any(x => x.Equals("parent2")), Is.True);
+        Assert.That(clonedContentType.CompositionAliases().Any(x => x.Equals("parent1")), Is.False);
+
+        Assert.AreEqual(clonedContentType.Path, "-1," + parentContentType2.Id + "," + clonedContentType.Id);
+        Assert.AreEqual(clonedContentType.PropertyTypes.Count(), originalContentType.PropertyTypes.Count());
+
+        Assert.AreNotEqual(clonedContentType.ParentId, originalContentType.ParentId);
+        Assert.AreEqual(clonedContentType.ParentId, parentContentType2.Id);
+
+        Assert.AreNotEqual(clonedContentType.Id, originalContentType.Id);
+        Assert.AreNotEqual(clonedContentType.Key, originalContentType.Key);
+        Assert.AreNotEqual(clonedContentType.Path, originalContentType.Path);
+
+        Assert.AreNotEqual(
+            clonedContentType.PropertyTypes.First(x => x.Alias.StartsWith("title")).Id,
+            originalContentType.PropertyTypes.First(x => x.Alias.StartsWith("title")).Id);
+        Assert.AreNotEqual(
+            clonedContentType.PropertyGroups.First(x => x.Name.StartsWith("Content")).Id,
+            originalContentType.PropertyGroups.First(x => x.Name.StartsWith("Content")).Id);
+    }
+
+    [Test]
+    public async Task Can_Copy_ContentType_With_Service_To_Root()
+    {
+        // Arrange
+        var metaContentType = ContentTypeBuilder.CreateMetaContentType();
+        await ContentTypeService.CreateAsync(metaContentType, Constants.Security.SuperUserKey);
+
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var simpleContentType = ContentTypeBuilder.CreateSimpleContentType(
+            "category",
+            "Category",
+            metaContentType,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(simpleContentType, Constants.Security.SuperUserKey);
+        var categoryId = simpleContentType.Id;
+
+        // Act
+        var copyResult = await ContentTypeService.CopyAsync(simpleContentType.Key, null);
+
+        // Assert
+        Assert.IsTrue(copyResult.Success);
+        var cloned = copyResult.Result;
+        Assert.IsNotNull(cloned);
+        Assert.That(cloned.HasIdentity, Is.True);
+
+        var original = ContentTypeService.Get(categoryId);
+
+        Assert.AreEqual(cloned.ParentId, -1);
+        Assert.AreEqual(cloned.Level, 1);
+        Assert.AreEqual(cloned.PropertyTypes.Count(), original.PropertyTypes.Count());
+        Assert.AreEqual(cloned.PropertyGroups.Count(), original.PropertyGroups.Count());
+
+        for (var i = 0; i < cloned.PropertyGroups.Count; i++)
+        {
+            Assert.AreEqual(
+                cloned.PropertyGroups[i].PropertyTypes.Count,
+                original.PropertyGroups[i].PropertyTypes.Count);
+            foreach (var propertyType in cloned.PropertyGroups[i].PropertyTypes)
+            {
+                Assert.IsTrue(propertyType.HasIdentity);
+            }
+        }
+
+        foreach (var propertyType in cloned.PropertyTypes)
+        {
+            Assert.IsTrue(propertyType.HasIdentity);
+        }
+
+        Assert.AreNotEqual(cloned.Id, original.Id);
+        Assert.AreNotEqual(cloned.Key, original.Key);
+        Assert.AreNotEqual(cloned.Path, original.Path);
+        Assert.AreNotEqual(cloned.SortOrder, original.SortOrder);
+    }
+
+    [Test]
+    public async Task Can_Clone_ContentType_To_New_Parent_By_Performing_Clone_And_Create()
+    {
+        // Arrange
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var parentContentType1 =
+            ContentTypeBuilder.CreateSimpleContentType("parent1", "Parent1", defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(parentContentType1, Constants.Security.SuperUserKey);
+        var parentContentType2 = ContentTypeBuilder.CreateSimpleContentType(
+            "parent2",
+            "Parent2",
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(parentContentType2, Constants.Security.SuperUserKey);
+
+        var simpleContentType = ContentTypeBuilder.CreateSimpleContentType(
+            "category",
+            "Category",
+            parentContentType1,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(simpleContentType, Constants.Security.SuperUserKey);
+
+        // Act - clone and re-parent via DeepCloneWithResetIdentities + CreateAsync
+        var clone = (IContentType)simpleContentType.DeepCloneWithResetIdentities("newAlias");
+        Assert.IsNotNull(clone);
+        clone.Name = "new alias";
+        clone.RemoveContentType("parent1");
+        clone.AddContentType(parentContentType2);
+        clone.ParentId = parentContentType2.Id;
+        await ContentTypeService.CreateAsync(clone, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(clone.HasIdentity, Is.True);
+
+        var clonedContentType = ContentTypeService.Get(clone.Id);
+        var originalContentType = ContentTypeService.Get(simpleContentType.Id);
+
+        Assert.That(clonedContentType.CompositionAliases().Any(x => x.Equals("parent2")), Is.True);
+        Assert.That(clonedContentType.CompositionAliases().Any(x => x.Equals("parent1")), Is.False);
+
+        Assert.AreEqual(clonedContentType.Path, "-1," + parentContentType2.Id + "," + clonedContentType.Id);
+        Assert.AreEqual(clonedContentType.PropertyTypes.Count(), originalContentType.PropertyTypes.Count());
+
+        Assert.AreNotEqual(clonedContentType.ParentId, originalContentType.ParentId);
+        Assert.AreEqual(clonedContentType.ParentId, parentContentType2.Id);
+
+        Assert.AreNotEqual(clonedContentType.Id, originalContentType.Id);
+        Assert.AreNotEqual(clonedContentType.Key, originalContentType.Key);
+        Assert.AreNotEqual(clonedContentType.Path, originalContentType.Path);
+
+        Assert.AreNotEqual(
+            clonedContentType.PropertyTypes.First(x => x.Alias.StartsWith("title")).Id,
+            originalContentType.PropertyTypes.First(x => x.Alias.StartsWith("title")).Id);
+        Assert.AreNotEqual(
+            clonedContentType.PropertyGroups.First(x => x.Name.StartsWith("Content")).Id,
+            originalContentType.PropertyGroups.First(x => x.Name.StartsWith("Content")).Id);
+    }
+
+    [Test]
+    public async Task Cannot_Add_Duplicate_PropertyType_Alias_To_Referenced_Composition()
+    {
+        // Related the second issue in screencast from this post http://issues.umbraco.org/issue/U4-5986
+
+        // Arrange
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var parent = ContentTypeBuilder.CreateSimpleContentType(defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(parent, Constants.Security.SuperUserKey);
+        var child = ContentTypeBuilder.CreateSimpleContentType(
+            "simpleChildPage",
+            "Simple Child Page",
+            parent,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(child, Constants.Security.SuperUserKey);
+        var composition = ContentTypeBuilder.CreateMetaContentType();
+        await ContentTypeService.CreateAsync(composition, Constants.Security.SuperUserKey);
+
+        // Adding Meta-composition to child doc type
+        child.AddContentType(composition);
+        await ContentTypeService.CreateAsync(child, Constants.Security.SuperUserKey);
+
+        // Act
+        var duplicatePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            {
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var added = composition.AddPropertyType(duplicatePropertyType, "meta", "Meta");
+
+        // Assert
+        Assert.That(added, Is.True);
+        Assert.ThrowsAsync<InvalidCompositionException>(async () => await ContentTypeService.CreateAsync(composition, Constants.Security.SuperUserKey));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("simpleChildPage"));
+    }
+
+    [Test]
+    public async Task Cannot_Add_Duplicate_PropertyType_Alias_In_Composition_Graph()
+    {
+        // Arrange
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var basePage = ContentTypeBuilder.CreateSimpleContentType(
+            "basePage",
+            "Base Page",
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateSimpleContentType(
+            "contentPage",
+            "Content Page",
+            basePage,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var advancedPage = ContentTypeBuilder.CreateSimpleContentType(
+            "advancedPage",
+            "Advanced Page",
+            contentPage,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var metaComposition = ContentTypeBuilder.CreateMetaContentType();
+        await ContentTypeService.CreateAsync(metaComposition, Constants.Security.SuperUserKey);
+        var seoComposition = ContentTypeBuilder.CreateMetaContentType("seo", "SEO");
+        await ContentTypeService.CreateAsync(seoComposition, Constants.Security.SuperUserKey);
+
+        var metaAdded = contentPage.AddContentType(metaComposition);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var seoAdded = advancedPage.AddContentType(seoComposition);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        // Act
+        var duplicatePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            {
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var addedToBasePage = basePage.AddPropertyType(duplicatePropertyType, "content", "Content");
+        var addedToAdvancedPage = advancedPage.AddPropertyType(duplicatePropertyType, "content", "Content");
+        var addedToMeta = metaComposition.AddPropertyType(duplicatePropertyType, "meta", "Meta");
+        var addedToSeo = seoComposition.AddPropertyType(duplicatePropertyType, "seo", "Seo");
+
+        // Assert
+        Assert.That(metaAdded, Is.True);
+        Assert.That(seoAdded, Is.True);
+
+        Assert.That(addedToBasePage, Is.True);
+        Assert.That(addedToAdvancedPage, Is.False);
+        Assert.That(addedToMeta, Is.True);
+        Assert.That(addedToSeo, Is.True);
+
+        Assert.ThrowsAsync<InvalidCompositionException>(async () => await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey));
+        Assert.ThrowsAsync<InvalidCompositionException>(async () => await ContentTypeService.CreateAsync(metaComposition, Constants.Security.SuperUserKey));
+        Assert.ThrowsAsync<InvalidCompositionException>(async () => await ContentTypeService.CreateAsync(seoComposition, Constants.Security.SuperUserKey));
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("meta"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("seo"));
+    }
+
+    [Test]
+    public async Task Cannot_Add_Duplicate_PropertyType_Alias_At_Root_Which_Conflicts_With_Third_Levels_Composition()
+    {
+        /*
+         * BasePage, gets 'Title' added but should not be allowed
+         * -- Content Page
+         * ---- Advanced Page -> Content Meta
+         * Content Meta :: Composition, has 'Title'
+         *
+         * Content Meta has 'Title' PropertyType
+         * Adding 'Title' to BasePage should fail
+        */
+
+        // Arrange
+        var basePage = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateBasicContentType("contentPage", "Content Page", basePage);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var advancedPage = ContentTypeBuilder.CreateBasicContentType("advancedPage", "Advanced Page", contentPage);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var contentMetaComposition = ContentTypeBuilder.CreateContentMetaContentType();
+        await ContentTypeService.CreateAsync(contentMetaComposition, Constants.Security.SuperUserKey);
+
+        // Act
+        var bodyTextPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "bodyText")
+            {
+                Name = "Body Text",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var bodyTextAdded = basePage.AddPropertyType(bodyTextPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorAdded = contentPage.AddPropertyType(authorPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var compositionAdded = advancedPage.AddContentType(contentMetaComposition);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        // NOTE: It should not be possible to Save 'BasePage' with the Title PropertyType added
+        var titlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            {
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var titleAdded = basePage.AddPropertyType(titlePropertyType, "content", "Content");
+
+        // Assert
+        Assert.That(bodyTextAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+        Assert.That(titleAdded, Is.True);
+        Assert.That(compositionAdded, Is.True);
+
+        Assert.ThrowsAsync<InvalidCompositionException>(async () => await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey));
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+    }
+
+    [Test]
+    public async Task Cannot_Save_ContentType_With_Empty_Name()
+    {
+        // Arrange
+        var contentType = ContentTypeBuilder.CreateSimpleContentType("contentType", string.Empty);
+
+        // Act
+        var result = await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.IsFalse(result.Success);
+        Assert.AreEqual(ContentTypeOperationStatus.NameCannotBeEmpty, result.Result);
+    }
+
+    [Test]
+    public async Task Cannot_Rename_PropertyType_Alias_On_Composition_Which_Would_Cause_Conflict_In_Other_Composition()
+    {
+        /*
+         * Meta renames alias to 'title'
+         * Seo has 'Title'
+         * BasePage
+         * -- ContentPage
+         * ---- AdvancedPage -> Seo
+         * ------ MoreAdvanedPage -> Meta
+         */
+
+        // Arrange
+        var basePage = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateBasicContentType("contentPage", "Content Page", basePage);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var advancedPage = ContentTypeBuilder.CreateBasicContentType("advancedPage", "Advanced Page", contentPage);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+        var moreAdvancedPage =
+            ContentTypeBuilder.CreateBasicContentType("moreAdvancedPage", "More Advanced Page", advancedPage);
+        await ContentTypeService.CreateAsync(moreAdvancedPage, Constants.Security.SuperUserKey);
+
+        var seoComposition = ContentTypeBuilder.CreateMetaContentType("seo", "SEO");
+        await ContentTypeService.CreateAsync(seoComposition, Constants.Security.SuperUserKey);
+        var metaComposition = ContentTypeBuilder.CreateMetaContentType();
+        await ContentTypeService.CreateAsync(metaComposition, Constants.Security.SuperUserKey);
+
+        // Act
+        var bodyTextPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "bodyText")
+            {
+                Name = "Body Text",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var bodyTextAdded = basePage.AddPropertyType(bodyTextPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorAdded = contentPage.AddPropertyType(authorPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var subtitlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "subtitle")
+            {
+                Name = "Subtitle",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var subtitleAdded = advancedPage.AddPropertyType(subtitlePropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var titlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            {
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var titleAdded = seoComposition.AddPropertyType(titlePropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(seoComposition, Constants.Security.SuperUserKey);
+
+        var seoCompositionAdded = advancedPage.AddContentType(seoComposition);
+        var metaCompositionAdded = moreAdvancedPage.AddContentType(metaComposition);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(moreAdvancedPage, Constants.Security.SuperUserKey);
+
+        var keywordsPropertyType = metaComposition.PropertyTypes.First(x => x.Alias.Equals("metakeywords"));
+        keywordsPropertyType.Alias = "title";
+
+        // Assert
+        Assert.That(bodyTextAdded, Is.True);
+        Assert.That(subtitleAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+        Assert.That(titleAdded, Is.True);
+        Assert.That(seoCompositionAdded, Is.True);
+        Assert.That(metaCompositionAdded, Is.True);
+
+        Assert.ThrowsAsync<InvalidCompositionException>(async () => await ContentTypeService.CreateAsync(metaComposition, Constants.Security.SuperUserKey));
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("moreAdvancedPage"));
+    }
+
+    [Test]
+    public async Task Can_Add_Additional_Properties_On_Composition_Once_Composition_Has_Been_Saved()
+    {
+        /*
+         * Meta renames alias to 'title'
+         * Seo has 'Title'
+         * BasePage
+         * -- ContentPage
+         * ---- AdvancedPage -> Seo
+         * ------ MoreAdvancedPage -> Meta
+         */
+
+        // Arrange
+        var basePage = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateBasicContentType("contentPage", "Content Page", basePage);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var advancedPage = ContentTypeBuilder.CreateBasicContentType("advancedPage", "Advanced Page", contentPage);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+        var moreAdvancedPage =
+            ContentTypeBuilder.CreateBasicContentType("moreAdvancedPage", "More Advanced Page", advancedPage);
+        await ContentTypeService.CreateAsync(moreAdvancedPage, Constants.Security.SuperUserKey);
+
+        var seoComposition = ContentTypeBuilder.CreateMetaContentType("seo", "SEO");
+        await ContentTypeService.CreateAsync(seoComposition, Constants.Security.SuperUserKey);
+        var metaComposition = ContentTypeBuilder.CreateMetaContentType();
+        await ContentTypeService.CreateAsync(metaComposition, Constants.Security.SuperUserKey);
+
+        // Act
+        var bodyTextPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "bodyText")
+            {
+                Name = "Body Text",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var bodyTextAdded = basePage.AddPropertyType(bodyTextPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorAdded = contentPage.AddPropertyType(authorPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var subtitlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "subtitle")
+            {
+                Name = "Subtitle",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var subtitleAdded = advancedPage.AddPropertyType(subtitlePropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var titlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            {
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var titleAdded = seoComposition.AddPropertyType(titlePropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(seoComposition, Constants.Security.SuperUserKey);
+
+        var seoCompositionAdded = advancedPage.AddContentType(seoComposition);
+        var metaCompositionAdded = moreAdvancedPage.AddContentType(metaComposition);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(moreAdvancedPage, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(bodyTextAdded, Is.True);
+        Assert.That(subtitleAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+        Assert.That(titleAdded, Is.True);
+        Assert.That(seoCompositionAdded, Is.True);
+        Assert.That(metaCompositionAdded, Is.True);
+
+        var testPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "test")
+            {
+                Name = "Test",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var testAdded = seoComposition.AddPropertyType(testPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(seoComposition, Constants.Security.SuperUserKey);
+
+        Assert.That(testAdded, Is.True);
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("moreAdvancedPage"));
+    }
+
+    [Test]
+    public async Task Cannot_Rename_PropertyGroup_On_Child_Avoiding_Conflict_With_Parent_PropertyGroup()
+    {
+        // Arrange
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+
+        var page = ContentTypeBuilder.CreateSimpleContentType(
+            "page",
+            "Page",
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(page, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateSimpleContentType(
+            "contentPage",
+            "Content Page",
+            page,
+            randomizeAliases: true,
+            propertyGroupAlias: "content2",
+            propertyGroupName: "Content_",
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var advancedPage = ContentTypeBuilder.CreateSimpleContentType(
+            "advancedPage",
+            "Advanced Page",
+            contentPage,
+            randomizeAliases: true,
+            propertyGroupAlias: "details",
+            propertyGroupName: "Details",
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var contentMetaComposition = ContentTypeBuilder.CreateContentMetaContentType();
+        await ContentTypeService.CreateAsync(contentMetaComposition, Constants.Security.SuperUserKey);
+
+        // Act
+        var subtitlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "subtitle")
+            {
+                Name = "Subtitle",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var subtitleAdded = contentPage.AddPropertyType(subtitlePropertyType, "content", "Content");
+        var authorAdded = contentPage.AddPropertyType(authorPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var compositionAdded = contentPage.AddContentType(contentMetaComposition);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        // Change the name of the tab on the "root" content type 'page'.
+        var propertyGroup = contentPage.PropertyGroups["content2"];
+        Assert.Throws<ArgumentException>(() => contentPage.PropertyGroups.Add(new PropertyGroup(true)
+        {
+            Id = propertyGroup.Id,
+            Alias = "content",
+            Name = "Content",
+            SortOrder = 0
+        }));
+
+        // Assert
+        Assert.That(compositionAdded, Is.True);
+        Assert.That(subtitleAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+    }
+
+    [Test]
+    public async Task Cannot_Rename_PropertyType_Alias_Causing_Conflicts_With_Parents()
+    {
+        // Arrange
+        var basePage = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateBasicContentType("contentPage", "Content Page", basePage);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var advancedPage = ContentTypeBuilder.CreateBasicContentType("advancedPage", "Advanced Page", contentPage);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        // Act
+        var titlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            {
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var titleAdded = basePage.AddPropertyType(titlePropertyType, "content", "Content");
+        var bodyTextPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "bodyText")
+            {
+                Name = "Body Text",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var bodyTextAdded = contentPage.AddPropertyType(bodyTextPropertyType, "content", "Content");
+        var subtitlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "subtitle")
+            {
+                Name = "Subtitle",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var subtitleAdded = contentPage.AddPropertyType(subtitlePropertyType, "content", "Content");
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorAdded = advancedPage.AddPropertyType(authorPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        // Rename the PropertyType to something that already exists in the Composition - NOTE this should not be allowed and Saving should throw an exception
+        var authorPropertyTypeToRename = advancedPage.PropertyTypes.First(x => x.Alias.Equals("author"));
+        authorPropertyTypeToRename.Alias = "title";
+
+        // Assert
+        Assert.That(bodyTextAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+        Assert.That(titleAdded, Is.True);
+        Assert.That(subtitleAdded, Is.True);
+
+        Assert.ThrowsAsync<InvalidCompositionException>(async () => await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey));
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+    }
+
+    [Test]
+    public async Task Can_Add_PropertyType_Alias_Which_Exists_In_Composition_Outside_Graph()
+    {
+        /*
+         * Meta (Composition)
+         * Content Meta (Composition) has 'Title' -> Meta
+         * BasePage
+         * -- ContentPage gets 'Title' added -> Meta
+         * ---- Advanced Page
+         */
+        // Arrange
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+        var basePage = ContentTypeBuilder.CreateSimpleContentType(
+            "basePage",
+            "Base Page",
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateSimpleContentType(
+            "contentPage",
+            "Content Page",
+            basePage,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var advancedPage = ContentTypeBuilder.CreateSimpleContentType(
+            "advancedPage",
+            "Advanced Page",
+            contentPage,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var metaComposition = ContentTypeBuilder.CreateMetaContentType();
+        await ContentTypeService.CreateAsync(metaComposition, Constants.Security.SuperUserKey);
+
+        var contentMetaComposition = ContentTypeBuilder.CreateContentMetaContentType();
+        await ContentTypeService.CreateAsync(contentMetaComposition, Constants.Security.SuperUserKey);
+
+        var metaAdded = contentPage.AddContentType(metaComposition);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var metaAddedToComposition = contentMetaComposition.AddContentType(metaComposition);
+        await ContentTypeService.CreateAsync(contentMetaComposition, Constants.Security.SuperUserKey);
+
+        // Act
+        var propertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            {
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var addedToContentPage = contentPage.AddPropertyType(propertyType, "content", "Content");
+
+        // Assert
+        Assert.That(metaAdded, Is.True);
+        Assert.That(metaAddedToComposition, Is.True);
+
+        Assert.That(addedToContentPage, Is.True);
+        Assert.DoesNotThrowAsync(async () => await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey));
+    }
+
+    [Test]
+    public async Task Can_Rename_PropertyGroup_With_Inherited_PropertyGroups()
+    {
+        // Related the first issue in screencast from this post http://issues.umbraco.org/issue/U4-5986
+
+        // Arrange
+        // create 'page' content type with a 'Content_' group
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+        var page = ContentTypeBuilder.CreateSimpleContentType(
+            "page",
+            "Page",
+            propertyGroupAlias: "content2",
+            propertyGroupName: "Content_",
+            defaultTemplateId: template.Id);
+        Assert.AreEqual(1, page.PropertyGroups.Count);
+        Assert.AreEqual("Content_", page.PropertyGroups.First().Name);
+        Assert.AreEqual(3, page.PropertyTypes.Count());
+        Assert.AreEqual("Title", page.PropertyTypes.First().Name);
+        Assert.AreEqual("Body text", page.PropertyTypes.Skip(1).First().Name);
+        Assert.AreEqual("Author", page.PropertyTypes.Skip(2).First().Name);
+        await ContentTypeService.CreateAsync(page, Constants.Security.SuperUserKey);
+
+        // create 'contentPage' content type as a child of 'page'
+        var contentPage = ContentTypeBuilder.CreateSimpleContentType(
+            "contentPage",
+            "Content Page",
+            page,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        Assert.AreEqual(1, page.PropertyGroups.Count);
+        Assert.AreEqual("Content_", page.PropertyGroups.First().Name);
+        Assert.AreEqual(3, contentPage.PropertyTypes.Count());
+        Assert.AreEqual("Title", contentPage.PropertyTypes.First().Name);
+        Assert.AreEqual("Body text", contentPage.PropertyTypes.Skip(1).First().Name);
+        Assert.AreEqual("Author", contentPage.PropertyTypes.Skip(2).First().Name);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        // add 'Content' group to 'meta' content type
+        var meta = ContentTypeBuilder.CreateMetaContentType();
+        Assert.AreEqual(1, meta.PropertyGroups.Count);
+        Assert.AreEqual("Meta", meta.PropertyGroups.First().Name);
+        Assert.AreEqual(2, meta.PropertyTypes.Count());
+        Assert.AreEqual("Meta Keywords", meta.PropertyTypes.First().Name);
+        Assert.AreEqual("Meta Description", meta.PropertyTypes.Skip(1).First().Name);
+        meta.AddPropertyGroup("content", "Content");
+        Assert.AreEqual(2, meta.PropertyTypes.Count());
+        await ContentTypeService.CreateAsync(meta, Constants.Security.SuperUserKey);
+
+        // add 'meta' content type to 'contentPage' composition
+        contentPage.AddContentType(meta);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        // add property 'prop1' to 'contentPage' group 'Content_'
+        var prop1 =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "testTextbox")
+            {
+                Name = "Test Textbox",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var prop1Added = contentPage.AddPropertyType(prop1, "content2", "Content_");
+        Assert.IsTrue(prop1Added);
+
+        // add property 'prop2' to 'contentPage' group 'Content'
+        var prop2 =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "anotherTextbox")
+            {
+                Name = "Another Test Textbox",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var prop2Added = contentPage.AddPropertyType(prop2, "content", "Content");
+        Assert.IsTrue(prop2Added);
+
+        // save 'contentPage' content type
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var group = page.PropertyGroups["content2"];
+        group.Name = "ContentTab"; // rename the group
+        await ContentTypeService.CreateAsync(page, Constants.Security.SuperUserKey);
+        Assert.AreEqual(3, page.PropertyTypes.Count());
+
+        // get 'contentPage' content type again
+        var contentPageAgain = ContentTypeService.Get("contentPage");
+        Assert.IsNotNull(contentPageAgain);
+
+        // assert that 'Content_' group is still there because we don't propagate renames
+        var findGroup = contentPageAgain.CompositionPropertyGroups.FirstOrDefault(x => x.Name == "Content_");
+        Assert.IsNotNull(findGroup);
+
+        // count all property types (local and composed)
+        var propertyTypeCount = contentPageAgain.PropertyTypes.Count();
+        Assert.That(propertyTypeCount, Is.EqualTo(5));
+
+        // count composed property types
+        var compPropertyTypeCount = contentPageAgain.CompositionPropertyTypes.Count();
+        Assert.That(compPropertyTypeCount, Is.EqualTo(10));
+    }
+
+    [Test]
+    public async Task Can_Rename_PropertyGroup_On_Parent_Without_Causing_Duplicate_PropertyGroups()
+    {
+        // Arrange
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+        var page = ContentTypeBuilder.CreateSimpleContentType(
+            "page",
+            "Page",
+            randomizeAliases: true,
+            propertyGroupAlias: "content2",
+            propertyGroupName: "Content_",
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(page, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateSimpleContentType(
+            "contentPage",
+            "Content Page",
+            page,
+            randomizeAliases: true,
+            propertyGroupAlias: "contentx",
+            propertyGroupName: "Contentx",
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+        var advancedPage = ContentTypeBuilder.CreateSimpleContentType(
+            "advancedPage",
+            "Advanced Page",
+            contentPage,
+            randomizeAliases: true,
+            propertyGroupAlias: "contenty",
+            propertyGroupName: "Contenty",
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var contentMetaComposition = ContentTypeBuilder.CreateContentMetaContentType();
+        await ContentTypeService.CreateAsync(contentMetaComposition, Constants.Security.SuperUserKey);
+        var compositionAdded = contentPage.AddContentType(contentMetaComposition);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        // Act
+        var bodyTextPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "bodyText")
+            {
+                Name = "Body Text",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var subtitlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "subtitle")
+            {
+                Name = "Subtitle",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var bodyTextAdded =
+            contentPage.AddPropertyType(
+                bodyTextPropertyType,
+                "content2",
+                "Content_"); // Will be added to the parent tab
+        var subtitleAdded =
+            contentPage.AddPropertyType(
+                subtitlePropertyType,
+                "content",
+                "Content"); // Will be added to the "Content Meta" composition
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var descriptionPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "description")
+            {
+                Name = "Description",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var keywordsPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "keywords")
+            {
+                Name = "Keywords",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorAdded =
+            advancedPage.AddPropertyType(
+                authorPropertyType,
+                "content2",
+                "Content_"); // Will be added to an ancestor tab
+        var descriptionAdded =
+            advancedPage.AddPropertyType(
+                descriptionPropertyType,
+                "contentx",
+                "Contentx"); // Will be added to a parent tab
+        var keywordsAdded =
+            advancedPage.AddPropertyType(
+                keywordsPropertyType,
+                "content",
+                "Content"); // Will be added to the "Content Meta" composition
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        // Change the name of the tab on the "root" content type 'page'.
+        var propertyGroup = page.PropertyGroups["content2"];
+        page.PropertyGroups.Add(new PropertyGroup(true)
+        {
+            Id = propertyGroup.Id,
+            Name = "Content",
+            Alias = "content",
+            SortOrder = 0
+        });
+        await ContentTypeService.CreateAsync(page, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(compositionAdded, Is.True);
+        Assert.That(bodyTextAdded, Is.True);
+        Assert.That(subtitleAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+        Assert.That(descriptionAdded, Is.True);
+        Assert.That(keywordsAdded, Is.True);
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+
+        var advancedPageReloaded = ContentTypeService.Get("advancedPage");
+        var contentUnderscoreTabExists =
+            advancedPageReloaded.CompositionPropertyGroups.Any(x => x.Name.Equals("Content_"));
+
+        // now is true, because we don't propagate renames anymore
+        Assert.That(contentUnderscoreTabExists, Is.True);
+
+        var numberOfContentTabs = advancedPageReloaded.CompositionPropertyGroups.Count(x => x.Name.Equals("Content"));
+        Assert.That(numberOfContentTabs, Is.EqualTo(4));
+    }
+
+    [Test]
+    public async Task Can_Rename_PropertyGroup_On_Parent_Without_Causing_Duplicate_PropertyGroups_v2()
+    {
+        // Arrange
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+        var page = ContentTypeBuilder.CreateSimpleContentType(
+            "page",
+            "Page",
+            randomizeAliases: true,
+            propertyGroupAlias: "content2",
+            propertyGroupName: "Content_",
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(page, Constants.Security.SuperUserKey);
+        var contentPage = ContentTypeBuilder.CreateSimpleContentType(
+            "contentPage",
+            "Content Page",
+            page,
+            randomizeAliases: true,
+            propertyGroupAlias: "content",
+            propertyGroupName: "Content",
+            defaultTemplateId: template.Id);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var contentMetaComposition = ContentTypeBuilder.CreateContentMetaContentType();
+        await ContentTypeService.CreateAsync(contentMetaComposition, Constants.Security.SuperUserKey);
+
+        // Act
+        var bodyTextPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "bodyText")
+            {
+                Name = "Body Text",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var subtitlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "subtitle")
+            {
+                Name = "Subtitle",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var bodyTextAdded = page.AddPropertyType(bodyTextPropertyType, "content2", "Content_");
+        var subtitleAdded = contentPage.AddPropertyType(subtitlePropertyType, "content", "Content");
+        var authorAdded = contentPage.AddPropertyType(authorPropertyType, "content2", "Content_");
+        await ContentTypeService.CreateAsync(page, Constants.Security.SuperUserKey);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var compositionAdded = contentPage.AddContentType(contentMetaComposition);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        // Change the alias/name of the tab on the "root" content type 'page'.
+        var propertyGroup = page.PropertyGroups["content2"];
+        page.PropertyGroups.Add(new PropertyGroup(true)
+        {
+            Id = propertyGroup.Id,
+            Alias = "content",
+            Name = "Content",
+            SortOrder = 0
+        });
+        await ContentTypeService.CreateAsync(page, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(compositionAdded, Is.True);
+        Assert.That(bodyTextAdded, Is.True);
+        Assert.That(subtitleAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+    }
+
+    [Test]
+    public async Task Can_Remove_PropertyGroup_On_Parent_Without_Causing_Duplicate_PropertyGroups()
+    {
+        // Arrange
+        var basePage = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        var contentPage = ContentTypeBuilder.CreateBasicContentType("contentPage", "Content Page", basePage);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var advancedPage = ContentTypeBuilder.CreateBasicContentType("advancedPage", "Advanced Page", contentPage);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var contentMetaComposition = ContentTypeBuilder.CreateContentMetaContentType();
+        await ContentTypeService.CreateAsync(contentMetaComposition, Constants.Security.SuperUserKey);
+
+        // Act
+        var bodyTextPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "bodyText")
+            {
+                Name = "Body Text",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var bodyTextAdded = basePage.AddPropertyType(bodyTextPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorAdded = contentPage.AddPropertyType(authorPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var compositionAdded = contentPage.AddContentType(contentMetaComposition);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        basePage.RemovePropertyGroup("content");
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(bodyTextAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+        Assert.That(compositionAdded, Is.True);
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+
+        var contentType = ContentTypeService.Get("contentPage");
+        var propertyGroup = contentType.PropertyGroups["content"];
+    }
+
+    [Test]
+    public async Task Can_Remove_PropertyGroup_Without_Removing_Property_Types()
+    {
+        var basePage = (IContentType)ContentTypeBuilder.CreateBasicContentType();
+        basePage.AddPropertyGroup("content", "Content");
+        basePage.AddPropertyGroup("meta", "Meta");
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        Assert.IsTrue(basePage.AddPropertyType(authorPropertyType, "content", "Content"));
+
+        var titlePropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "title")
+            {
+                Name = "Title",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        Assert.IsTrue(basePage.AddPropertyType(titlePropertyType, "meta", "Meta"));
+
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        basePage = ContentTypeService.Get(basePage.Id);
+
+        var count = basePage.PropertyTypes.Count();
+        Assert.AreEqual(2, count);
+
+        basePage.RemovePropertyGroup("content");
+
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+        basePage = ContentTypeService.Get(basePage.Id);
+
+        Assert.AreEqual(count, basePage.PropertyTypes.Count());
+    }
+
+    [Test]
+    public async Task Can_Add_PropertyGroup_With_Same_Name_On_Parent_and_Child()
+    {
+        /*
+         * BasePage
+         * - Content Page
+         * -- Advanced Page
+         * Content Meta :: Composition
+        */
+
+        // Arrange
+        var basePage = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        var contentPage = ContentTypeBuilder.CreateBasicContentType("contentPage", "Content Page", basePage);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var advancedPage = ContentTypeBuilder.CreateBasicContentType("advancedPage", "Advanced Page", contentPage);
+        await ContentTypeService.CreateAsync(advancedPage, Constants.Security.SuperUserKey);
+
+        var contentMetaComposition = ContentTypeBuilder.CreateContentMetaContentType();
+        await ContentTypeService.CreateAsync(contentMetaComposition, Constants.Security.SuperUserKey);
+
+        // Act
+        var authorPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "author")
+            {
+                Name = "Author",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var authorAdded = contentPage.AddPropertyType(authorPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        var bodyTextPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext,
+                "bodyText")
+            {
+                Name = "Body Text",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var bodyTextAdded = basePage.AddPropertyType(bodyTextPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(basePage, Constants.Security.SuperUserKey);
+
+        var compositionAdded = contentPage.AddContentType(contentMetaComposition);
+        await ContentTypeService.CreateAsync(contentPage, Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(bodyTextAdded, Is.True);
+        Assert.That(authorAdded, Is.True);
+        Assert.That(compositionAdded, Is.True);
+
+        Assert.DoesNotThrow(() => ContentTypeService.Get("contentPage"));
+        Assert.DoesNotThrow(() => ContentTypeService.Get("advancedPage"));
+
+        var contentType = ContentTypeService.Get("contentPage");
+        var propertyGroup = contentType.PropertyGroups["content"];
+
+        var numberOfContentTabs = contentType.CompositionPropertyGroups.Count(x => x.Name.Equals("Content"));
+        Assert.That(numberOfContentTabs, Is.EqualTo(3));
+
+        // Ensure that adding a new PropertyType to the "Content"-tab also adds it to the right group
+        var descriptionPropertyType =
+            new PropertyType(
+                ShortStringHelper,
+                Constants.PropertyEditors.Aliases.TextBox,
+                ValueStorageType.Ntext)
+            {
+                Alias = "description",
+                Name = "Description",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            };
+        var descriptionAdded = contentType.AddPropertyType(descriptionPropertyType, "content", "Content");
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+        Assert.That(descriptionAdded, Is.True);
+
+        var contentPageReloaded = ContentTypeService.Get("contentPage");
+        var propertyGroupReloaded = contentPageReloaded.PropertyGroups["content"];
+        var hasDescriptionPropertyType = propertyGroupReloaded.PropertyTypes.Contains("description");
+        Assert.That(hasDescriptionPropertyType, Is.True);
+
+        var descriptionPropertyTypeReloaded = propertyGroupReloaded.PropertyTypes["description"];
+        Assert.That(descriptionPropertyTypeReloaded.PropertyGroupId.IsValueCreated, Is.False);
+    }
+
+    [Test]
+    public async Task Empty_Description_Is_Always_Null_After_Saving_Content_Type()
+    {
+        var contentType = ContentTypeBuilder.CreateBasicContentType();
+        contentType.Description = null;
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        var contentType2 = ContentTypeBuilder.CreateBasicContentType("basePage2", "Base Page 2");
+        contentType2.Description = string.Empty;
+        await ContentTypeService.CreateAsync(contentType2, Constants.Security.SuperUserKey);
+
+        Assert.IsNull(contentType.Description);
+        Assert.IsNull(contentType2.Description);
+    }
+
+    [Test]
+    public async Task Variations_In_Compositions()
+    {
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+        var typeA = ContentTypeBuilder.CreateSimpleContentType("a", "A", defaultTemplateId: template.Id);
+        typeA.Variations = ContentVariation.Culture; // make it variant
+        typeA.PropertyTypes.First(x => x.Alias.InvariantEquals("title")).Variations =
+            ContentVariation.Culture; // with a variant property
+        await ContentTypeService.CreateAsync(typeA, Constants.Security.SuperUserKey);
+
+        var typeB = ContentTypeBuilder.CreateSimpleContentType(
+            "b",
+            "B",
+            typeA,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        typeB.Variations = ContentVariation.Nothing; // make it invariant
+        await ContentTypeService.CreateAsync(typeB, Constants.Security.SuperUserKey);
+
+        var typeC = ContentTypeBuilder.CreateSimpleContentType(
+            "c",
+            "C",
+            typeA,
+            randomizeAliases: true,
+            defaultTemplateId: template.Id);
+        typeC.Variations = ContentVariation.Culture; // make it variant
+        await ContentTypeService.CreateAsync(typeC, Constants.Security.SuperUserKey);
+
+        // property is variant on A
+        var test = ContentTypeService.Get(typeA.Id);
+        Assert.AreEqual(
+            ContentVariation.Culture,
+            test.CompositionPropertyTypes.First(x => x.Alias.InvariantEquals("title")).Variations);
+        Assert.AreEqual(
+            ContentVariation.Culture,
+            test.CompositionPropertyGroups.Last().PropertyTypes.First(x => x.Alias.InvariantEquals("title"))
+                .Variations);
+
+        // but not on B
+        test = ContentTypeService.Get(typeB.Id);
+        Assert.AreEqual(
+            ContentVariation.Nothing,
+            test.CompositionPropertyTypes.First(x => x.Alias.InvariantEquals("title")).Variations);
+        Assert.AreEqual(
+            ContentVariation.Nothing,
+            test.CompositionPropertyGroups.Last().PropertyTypes.First(x => x.Alias.InvariantEquals("title"))
+                .Variations);
+
+        // but on C
+        test = ContentTypeService.Get(typeC.Id);
+        Assert.AreEqual(
+            ContentVariation.Culture,
+            test.CompositionPropertyTypes.First(x => x.Alias.InvariantEquals("title")).Variations);
+        Assert.AreEqual(
+            ContentVariation.Culture,
+            test.CompositionPropertyGroups.Last().PropertyTypes.First(x => x.Alias.InvariantEquals("title")).Variations);
+    }
+
+    [Test]
+    public async Task Can_Create_Property_Type_Based_On_DataTypeKey()
+    {
+        // Arrange
+        var cts = ContentTypeService;
+        var dtdYesNo = await DataTypeService.GetAsync(Constants.DataTypes.Guids.CheckboxGuid);
+        IContentType ctBase = new ContentType(ShortStringHelper, -1)
+        {
+            Name = "Base",
+            Alias = "Base",
+            Icon = "folder.gif",
+            Thumbnail = "folder.png"
+        };
+        ctBase.AddPropertyType(new PropertyType(ShortStringHelper, "ShouldNotMatter", ValueStorageType.Nvarchar)
+        {
+            Name = "Hide From Navigation",
+            Alias = Constants.Conventions.Content.NaviHide,
+            DataTypeKey = dtdYesNo.Key
+        });
+        await cts.CreateAsync(ctBase, Constants.Security.SuperUserKey);
+
+        // Assert
+        ctBase = cts.Get(ctBase.Key);
+        Assert.That(ctBase, Is.Not.Null);
+        Assert.That(ctBase.HasIdentity, Is.True);
+        Assert.That(ctBase.PropertyTypes.Count(), Is.EqualTo(1));
+        Assert.That(ctBase.PropertyTypes.First().DataTypeId, Is.EqualTo(dtdYesNo.Id));
+        Assert.That(ctBase.PropertyTypes.First().PropertyEditorAlias, Is.EqualTo(dtdYesNo.EditorAlias));
+    }
+
+    [Test]
+    public async Task Can_Create_Property_Type_Based_On_PropertyEditorAlias()
+    {
+        // Arrange
+        var cts = ContentTypeService;
+        var dtdYesNo = await DataTypeService.GetAsync(Constants.DataTypes.Guids.CheckboxGuid);
+        IContentType ctBase = new ContentType(ShortStringHelper, -1)
+        {
+            Name = "Base",
+            Alias = "Base",
+            Icon = "folder.gif",
+            Thumbnail = "folder.png"
+        };
+        ctBase.AddPropertyType(new PropertyType(ShortStringHelper, "Umbraco.TrueFalse", ValueStorageType.Nvarchar)
+        {
+            Name = "Hide From Navigation",
+            Alias = Constants.Conventions.Content.NaviHide,
+        });
+        await cts.CreateAsync(ctBase, Constants.Security.SuperUserKey);
+
+        // Assert
+        ctBase = cts.Get(ctBase.Key);
+        Assert.That(ctBase, Is.Not.Null);
+        Assert.That(ctBase.HasIdentity, Is.True);
+        Assert.That(ctBase.PropertyTypes.Count(), Is.EqualTo(1));
+        Assert.That(ctBase.PropertyTypes.First().DataTypeId, Is.EqualTo(dtdYesNo.Id));
+        Assert.That(ctBase.PropertyTypes.First().PropertyEditorAlias, Is.EqualTo(dtdYesNo.EditorAlias));
+    }
+
+    [Test]
+    public async Task CreateTemplateAsync_Success()
+    {
+        // Arrange
+        IContentType contentType = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Act
+        var result = await ContentTypeService.CreateTemplateAsync(
+            contentType.Key,
+            "Test Template",
+            "testTemplate",
+            isDefaultTemplate: false,
+            Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(result.Success, Is.True);
+        Assert.That(result.Result, Is.Not.Null);
+        Assert.That(result.Status, Is.EqualTo(ContentTypeOperationStatus.Success));
+
+        // Verify template was associated with content type
+        var updatedContentType = ContentTypeService.Get(contentType.Key);
+        Assert.That(updatedContentType!.AllowedTemplates.Any(t => t.Key == result.Result), Is.True);
+    }
+
+    [Test]
+    public async Task CreateTemplateAsync_ContentTypeNotFound_ReturnsNotFound()
+    {
+        // Arrange
+        var nonExistentKey = Guid.NewGuid();
+
+        // Act
+        var result = await ContentTypeService.CreateTemplateAsync(
+            nonExistentKey,
+            "Test Template",
+            "testTemplate",
+            isDefaultTemplate: false,
+            Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(result.Success, Is.False);
+        Assert.That(result.Status, Is.EqualTo(ContentTypeOperationStatus.NotFound));
+    }
+
+    [Test]
+    public async Task CreateTemplateAsync_EmptyAlias_ReturnsInvalidTemplateAlias()
+    {
+        // Arrange
+        IContentType contentType = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Act - use an empty alias which is invalid
+        var result = await ContentTypeService.CreateTemplateAsync(
+            contentType.Key,
+            "Test Template",
+            "   ",
+            isDefaultTemplate: false,
+            Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(result.Success, Is.False);
+        Assert.That(result.Status, Is.EqualTo(ContentTypeOperationStatus.InvalidTemplateAlias));
+    }
+
+    [Test]
+    public async Task CreateTemplateAsync_TooLongAlias_ReturnsInvalidTemplateAlias()
+    {
+        // Arrange
+        IContentType contentType = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Act - use an alias that exceeds the maximum length (255 characters)
+        var tooLongAlias = new string('a', 300);
+        var result = await ContentTypeService.CreateTemplateAsync(
+            contentType.Key,
+            "Test Template",
+            tooLongAlias,
+            isDefaultTemplate: false,
+            Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(result.Success, Is.False);
+        Assert.That(result.Status, Is.EqualTo(ContentTypeOperationStatus.InvalidTemplateAlias));
+    }
+
+    [Test]
+    public async Task CreateTemplateAsync_WithIsDefault_SetsAsDefaultTemplate()
+    {
+        // Arrange
+        IContentType contentType = ContentTypeBuilder.CreateBasicContentType();
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Act
+        var result = await ContentTypeService.CreateTemplateAsync(
+            contentType.Key,
+            "Default Template",
+            "defaultTemplate",
+            isDefaultTemplate: true,
+            Constants.Security.SuperUserKey);
+
+        // Assert
+        Assert.That(result.Success, Is.True);
+        Assert.That(result.Result, Is.Not.Null);
+
+        // Verify template was set as default
+        var updatedContentType = ContentTypeService.Get(contentType.Key);
+        Assert.That(updatedContentType!.DefaultTemplate, Is.Not.Null);
+        Assert.That(updatedContentType.DefaultTemplate!.Key, Is.EqualTo(result.Result));
+    }
+
+    [Test]
+    public async Task GetAllContentTypeIds_Returns_Ids_Across_Content_Media_And_Member_Types()
+    {
+        // Arrange - Create a content type
+        var contentType = ContentTypeBuilder.CreateBasicContentType("myContentType", "My Content Type");
+        await ContentTypeService.CreateAsync(contentType, Constants.Security.SuperUserKey);
+
+        // Create a media type
+        var mediaType = MediaTypeBuilder.CreateSimpleMediaType("myMediaType", "My Media Type");
+        await MediaTypeService.CreateAsync(mediaType, Constants.Security.SuperUserKey);
+
+        // Create a member type
+        var memberType = MemberTypeBuilder.CreateSimpleMemberType("myMemberType", "My Member Type");
+        await MemberTypeService.CreateAsync(memberType, Constants.Security.SuperUserKey);
+
+        // Act - Query for all three aliases
+        var result = ContentTypeService.GetAllContentTypeIds(["myContentType", "myMediaType", "myMemberType"]).ToArray();
+
+        // Assert - Should return IDs from all three type categories
+        Assert.That(result.Length, Is.EqualTo(3));
+        Assert.That(result, Contains.Item(contentType.Id));
+        Assert.That(result, Contains.Item(mediaType.Id));
+        Assert.That(result, Contains.Item(memberType.Id));
+    }
+
+    [Test]
+    public async Task GetAllowedParentKeysAsync_ReturnsEmptyCollection_WhenNoParentsAllowChildType()
+    {
+        // Arrange
+        var childContentType = ContentTypeBuilder.CreateBasicContentType("child", "Child");
+        await ContentTypeService.CreateAsync(childContentType, Constants.Security.SuperUserKey);
+
+        var parentContentType = ContentTypeBuilder.CreateBasicContentType("parent", "Parent");
+
+        // Parent does not allow child as a child type
+        await ContentTypeService.CreateAsync(parentContentType, Constants.Security.SuperUserKey);
+
+        // Act
+        var result = await ContentTypeService.GetAllowedParentKeysAsync(childContentType.Key);
+
+        // Assert
+        Assert.That(result.Success, Is.True);
+        Assert.That(result.Result, Is.Not.Null);
+        Assert.That(result.Result, Is.Empty);
+    }
+
+    [Test]
+    public async Task GetAllowedParentKeysAsync_ReturnsParentKeys_WhenParentsAllowChildType()
+    {
+        // Arrange
+        var childContentType = ContentTypeBuilder.CreateBasicContentType("child", "Child");
+        await ContentTypeService.CreateAsync(childContentType, Constants.Security.SuperUserKey);
+
+        var parentContentType1 = ContentTypeBuilder.CreateBasicContentType("parent1", "Parent1");
+        parentContentType1.AllowedContentTypes =
+        [
+            new ContentTypeSort(childContentType.Key, 0, childContentType.Alias)
+        ];
+        await ContentTypeService.CreateAsync(parentContentType1, Constants.Security.SuperUserKey);
+
+        var parentContentType2 = ContentTypeBuilder.CreateBasicContentType("parent2", "Parent2");
+        parentContentType2.AllowedContentTypes =
+        [
+            new ContentTypeSort(childContentType.Key, 0, childContentType.Alias)
+        ];
+        await ContentTypeService.CreateAsync(parentContentType2, Constants.Security.SuperUserKey);
+
+        // A parent that does NOT allow the child type
+        var unrelatedParentContentType = ContentTypeBuilder.CreateBasicContentType("unrelated", "Unrelated");
+        await ContentTypeService.CreateAsync(unrelatedParentContentType, Constants.Security.SuperUserKey);
+
+        // Act
+        var result = await ContentTypeService.GetAllowedParentKeysAsync(childContentType.Key);
+
+        // Assert
+        Assert.That(result.Success, Is.True);
+        Assert.That(result.Result, Is.Not.Null);
+        var parentKeys = result.Result!.ToList();
+        Assert.That(parentKeys.Count, Is.EqualTo(2));
+        Assert.That(parentKeys, Does.Contain(parentContentType1.Key));
+        Assert.That(parentKeys, Does.Contain(parentContentType2.Key));
+        Assert.That(parentKeys, Does.Not.Contain(unrelatedParentContentType.Key));
+    }
+
+    [Test]
+    public async Task GetAllowedParentKeysAsync_ReturnsSuccessFalse_WhenContentTypeDoesNotExist()
+    {
+        // Arrange
+        var nonExistentKey = Guid.NewGuid();
+
+        // Act
+        var result = await ContentTypeService.GetAllowedParentKeysAsync(nonExistentKey);
+
+        // Assert
+        Assert.That(result.Success, Is.False);
+    }
+
+    private ContentType CreateComponent()
+    {
+        var component = new ContentType(ShortStringHelper, -1)
+        {
+            Alias = "component",
+            Name = "Component",
+            Description = "ContentType used for Component grouping",
+            Icon = ".sprTreeDoc3",
+            Thumbnail = "doc.png",
+            SortOrder = 1,
+            CreatorId = 0,
+            Trashed = false
+        };
+
+        var contentCollection = new PropertyTypeCollection(true)
+        {
+            new PropertyType(ShortStringHelper, "test", ValueStorageType.Ntext, "componentGroup")
+            {
+                Name = "Component Group",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            }
+        };
+
+        component.PropertyGroups.Add(new PropertyGroup(contentCollection)
+        {
+            Alias = "component",
+            Name = "Component",
+            SortOrder = 1
+        });
+
+        return component;
+    }
+
+    private ContentType CreateBannerComponent(ContentType parent)
+    {
+        const string contentTypeAlias = "banner";
+        var banner = new ContentType(ShortStringHelper, parent, contentTypeAlias)
+        {
+            Alias = contentTypeAlias,
+            Name = "Banner Component",
+            Description = "ContentType used for Banner Component",
+            Icon = ".sprTreeDoc3",
+            Thumbnail = "doc.png",
+            SortOrder = 1,
+            CreatorId = 0,
+            Trashed = false
+        };
+
+        var propertyType = new PropertyType(
+            ShortStringHelper,
+            "test",
+            ValueStorageType.Ntext,
+            "bannerName")
+        {
+            Name = "Banner Name",
+            Description = string.Empty,
+            Mandatory = false,
+            SortOrder = 2,
+            DataTypeId = -88
+        };
+        banner.AddPropertyType(propertyType, "component", "Component");
+        return banner;
+    }
+
+    private ContentType CreateSite()
+    {
+        var site = new ContentType(ShortStringHelper, -1)
+        {
+            Alias = "site",
+            Name = "Site",
+            Description = "ContentType used for Site inheritence",
+            Icon = ".sprTreeDoc3",
+            Thumbnail = "doc.png",
+            SortOrder = 2,
+            CreatorId = 0,
+            Trashed = false
+        };
+
+        var contentCollection = new PropertyTypeCollection(true)
+        {
+            new PropertyType(ShortStringHelper, "test", ValueStorageType.Ntext, "hostname")
+            {
+                Name = "Hostname",
+                Description = string.Empty,
+                Mandatory = false,
+                SortOrder = 1,
+                DataTypeId = -88
+            }
+        };
+        site.PropertyGroups.Add(
+            new PropertyGroup(contentCollection) { Name = "Site Settings", Alias = "siteSettings", SortOrder = 1 });
+
+        return site;
+    }
+
+    private async Task<ContentType> CreateHomepage(ContentType parent)
+    {
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+        return ContentTypeBuilder.CreateSimpleContentType(
+            "homepage",
+            "Homepage",
+            parent,
+            defaultTemplateId: template.Id);
+    }
+
+    private async Task<IContentType[]> CreateContentTypeHierarchy()
+    {
+        // create the master type
+        var template = TemplateBuilder.CreateTextPageTemplate();
+        await TemplateService.CreateAsync(template, Constants.Security.SuperUserKey);
+        var masterContentType = ContentTypeBuilder.CreateSimpleContentType(
+            "masterContentType",
+            "MasterContentType",
+            defaultTemplateId: template.Id);
+        masterContentType.Key = new Guid("C00CA18E-5A9D-483B-A371-EECE0D89B4AE");
+        await ContentTypeService.CreateAsync(masterContentType, Constants.Security.SuperUserKey);
+
+        // add the one we just created
+        var list = new List<IContentType> { masterContentType };
+
+        for (var i = 0; i < 10; i++)
+        {
+            var contentType = ContentTypeBuilder.CreateSimpleContentType(
+                "childType" + i,
+                "ChildType" + i,
+                list.Last(), // make the last entry in the list, this one's parent
+                randomizeAliases: true,
+                defaultTemplateId: template.Id);
+
+            list.Add(contentType);
+        }
+
+        return list.ToArray();
+    }
+
+    internal sealed class ContentNotificationHandler : INotificationHandler<ContentMovedToRecycleBinNotification>
+    {
+        public static Action<ContentMovedToRecycleBinNotification> MovedContentToRecycleBin { get; set; }
+
+        public void Handle(ContentMovedToRecycleBinNotification notification) =>
+            MovedContentToRecycleBin?.Invoke(notification);
+    }
+
+    internal sealed class ContentTypeNotificationHandler : INotificationHandler<ContentTypeDeletedNotification>
+    {
+        public static Action<ContentTypeDeletedNotification> Deleted { get; set; }
+        public void Handle(ContentTypeDeletedNotification notification) => Deleted?.Invoke(notification);
+    }
+
+    internal sealed class ContentTypeDeletingNotificationHandler : INotificationHandler<ContentTypeDeletingNotification>
+    {
+        public static bool CancelOperation { get; set; }
+
+        public void Handle(ContentTypeDeletingNotification notification)
+        {
+            if (CancelOperation)
+            {
+                notification.CancelOperation(new EventMessage("Test", "Cancelled by test", EventMessageType.Error));
+            }
+        }
+    }
+
+    [Test]
+    public async Task GetAllAllowedAsRootAsync_Returns_Only_ContentTypes_Allowed_At_Root()
+    {
+        // Arrange
+        PagedModel<IContentType> baseline = await ContentTypeService.GetAllAllowedAsRootAsync(0, 1000);
+
+        var allowedAtRoot = ContentTypeBuilder.CreateSimpleContentType("allowed", "Allowed");
+        allowedAtRoot.AllowedAsRoot = true;
+        await ContentTypeService.CreateAsync(allowedAtRoot, Constants.Security.SuperUserKey);
+
+        var notAllowedAtRoot = ContentTypeBuilder.CreateSimpleContentType("notAllowed", "Not Allowed");
+        notAllowedAtRoot.AllowedAsRoot = false;
+        await ContentTypeService.CreateAsync(notAllowedAtRoot, Constants.Security.SuperUserKey);
+
+        // Act
+        PagedModel<IContentType> result = await ContentTypeService.GetAllAllowedAsRootAsync(0, 1000);
+
+        // Assert
+        Assert.Multiple(() =>
+        {
+            Assert.AreEqual(baseline.Total + 1, result.Total);
+            Assert.IsTrue(result.Items.Any(x => x.Key == allowedAtRoot.Key));
+            Assert.IsFalse(result.Items.Any(x => x.Key == notAllowedAtRoot.Key));
+        });
+    }
+}

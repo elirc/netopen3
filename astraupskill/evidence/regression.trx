@@ -1,0 +1,51 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TestRun id="a9942625-af52-45d2-bd78-d253d05adb29" name="Owner@DESKTOP-T0PFEUT 2026-09-20 14:20:19" runUser="DESKTOP-T0PFEUT\Owner" xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010">
+  <Times creation="2026-09-20T14:20:19.7995643-07:00" queuing="2026-09-20T14:20:19.7995650-07:00" start="2026-09-20T14:19:58.4093711-07:00" finish="2026-09-20T14:20:23.0404911-07:00" />
+  <TestSettings name="default" id="a9e73900-bc31-4a24-a929-da74a1f41559">
+    <Deployment runDeploymentRoot="Owner_DESKTOP-T0PFEUT_2026-09-20_14_20_19" />
+  </TestSettings>
+  <Results>
+    <UnitTestResult executionId="58a3fac1-fd88-461b-9ba9-4d3ca66f9c53" testId="5f445cd9-60cf-ddf0-acc0-d7164893f1c5" testName="Search_Template_Item_Excludes_Unrequested_And_Missing_Entities_Without_Changing_Total" computerName="DESKTOP-T0PFEUT" duration="00:00:00.1680190" startTime="2026-09-20T14:20:19.6132728-07:00" endTime="2026-09-20T14:20:19.7812917-07:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="58a3fac1-fd88-461b-9ba9-4d3ca66f9c53" />
+    <UnitTestResult executionId="8bd9264c-ac89-4bde-b6e7-217c2b10e071" testId="f98c154f-613a-ca6d-263d-f5b1485ed17b" testName="Search_Template_Item_Empty_Page_Preserves_Total_Without_Hydration_Or_Mapping" computerName="DESKTOP-T0PFEUT" duration="00:00:00.1856040" startTime="2026-09-20T14:20:19.4224205-07:00" endTime="2026-09-20T14:20:19.6080256-07:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="8bd9264c-ac89-4bde-b6e7-217c2b10e071" />
+    <UnitTestResult executionId="2877cccd-ea64-4516-b08a-a3afa8e89aa3" testId="bc42f823-5f8e-44f1-c237-dbe0c28251d4" testName="Search_Template_Item_Collapses_Duplicate_Keys_And_Keeps_First_Hydrated_Entity" computerName="DESKTOP-T0PFEUT" duration="00:00:10.1044170" startTime="2026-09-20T14:20:09.2355342-07:00" endTime="2026-09-20T14:20:19.3182042-07:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="2877cccd-ea64-4516-b08a-a3afa8e89aa3" />
+    <UnitTestResult executionId="9de8f4ea-331d-4241-8a3c-aa0762521d74" testId="898dae67-4ffa-f218-ce41-1c7b9a26198a" testName="Search_Template_Item_Returns_Items_Ordered_By_Search_Result_Order" computerName="DESKTOP-T0PFEUT" duration="00:00:00.5517890" startTime="2026-09-20T14:20:19.7842645-07:00" endTime="2026-09-20T14:20:20.3360531-07:00" testType="13cdc9d9-ddb5-4fa4-a97d-d965ccfc6d4b" outcome="Passed" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" relativeResultsDirectory="9de8f4ea-331d-4241-8a3c-aa0762521d74" />
+  </Results>
+  <TestDefinitions>
+    <UnitTest name="Search_Template_Item_Empty_Page_Preserves_Total_Without_Hydration_Or_Mapping" storage="c:\users\owner\desktop\astraorganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\debug\net10.0\templateorder.tests.dll" id="f98c154f-613a-ca6d-263d-f5b1485ed17b">
+      <Execution id="8bd9264c-ac89-4bde-b6e7-217c2b10e071" />
+      <TestMethod codeBase="C:\Users\Owner\Desktop\AstraOrganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\Debug\net10.0\TemplateOrder.Tests.dll" adapterTypeName="executor://nunit3testexecutor/" className="Umbraco.Cms.Tests.UnitTests.Umbraco.Cms.Api.Management.Controllers.Template.Item.SearchTemplateItemControllerTests" name="Search_Template_Item_Empty_Page_Preserves_Total_Without_Hydration_Or_Mapping" />
+    </UnitTest>
+    <UnitTest name="Search_Template_Item_Collapses_Duplicate_Keys_And_Keeps_First_Hydrated_Entity" storage="c:\users\owner\desktop\astraorganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\debug\net10.0\templateorder.tests.dll" id="bc42f823-5f8e-44f1-c237-dbe0c28251d4">
+      <Execution id="2877cccd-ea64-4516-b08a-a3afa8e89aa3" />
+      <TestMethod codeBase="C:\Users\Owner\Desktop\AstraOrganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\Debug\net10.0\TemplateOrder.Tests.dll" adapterTypeName="executor://nunit3testexecutor/" className="Umbraco.Cms.Tests.UnitTests.Umbraco.Cms.Api.Management.Controllers.Template.Item.SearchTemplateItemControllerTests" name="Search_Template_Item_Collapses_Duplicate_Keys_And_Keeps_First_Hydrated_Entity" />
+    </UnitTest>
+    <UnitTest name="Search_Template_Item_Returns_Items_Ordered_By_Search_Result_Order" storage="c:\users\owner\desktop\astraorganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\debug\net10.0\templateorder.tests.dll" id="898dae67-4ffa-f218-ce41-1c7b9a26198a">
+      <Execution id="9de8f4ea-331d-4241-8a3c-aa0762521d74" />
+      <TestMethod codeBase="C:\Users\Owner\Desktop\AstraOrganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\Debug\net10.0\TemplateOrder.Tests.dll" adapterTypeName="executor://nunit3testexecutor/" className="Umbraco.Cms.Tests.UnitTests.Umbraco.Cms.Api.Management.Controllers.Template.Item.SearchTemplateItemControllerTests" name="Search_Template_Item_Returns_Items_Ordered_By_Search_Result_Order" />
+    </UnitTest>
+    <UnitTest name="Search_Template_Item_Excludes_Unrequested_And_Missing_Entities_Without_Changing_Total" storage="c:\users\owner\desktop\astraorganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\debug\net10.0\templateorder.tests.dll" id="5f445cd9-60cf-ddf0-acc0-d7164893f1c5">
+      <Execution id="58a3fac1-fd88-461b-9ba9-4d3ca66f9c53" />
+      <TestMethod codeBase="C:\Users\Owner\Desktop\AstraOrganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\Debug\net10.0\TemplateOrder.Tests.dll" adapterTypeName="executor://nunit3testexecutor/" className="Umbraco.Cms.Tests.UnitTests.Umbraco.Cms.Api.Management.Controllers.Template.Item.SearchTemplateItemControllerTests" name="Search_Template_Item_Excludes_Unrequested_And_Missing_Entities_Without_Changing_Total" />
+    </UnitTest>
+  </TestDefinitions>
+  <TestEntries>
+    <TestEntry testId="5f445cd9-60cf-ddf0-acc0-d7164893f1c5" executionId="58a3fac1-fd88-461b-9ba9-4d3ca66f9c53" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="f98c154f-613a-ca6d-263d-f5b1485ed17b" executionId="8bd9264c-ac89-4bde-b6e7-217c2b10e071" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="bc42f823-5f8e-44f1-c237-dbe0c28251d4" executionId="2877cccd-ea64-4516-b08a-a3afa8e89aa3" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestEntry testId="898dae67-4ffa-f218-ce41-1c7b9a26198a" executionId="9de8f4ea-331d-4241-8a3c-aa0762521d74" testListId="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+  </TestEntries>
+  <TestLists>
+    <TestList name="Results Not in a List" id="8c84fa94-04c1-424b-9868-57a2d4851a1d" />
+    <TestList name="All Loaded Results" id="19431567-8539-422a-85d7-44ee4e166bda" />
+  </TestLists>
+  <ResultSummary outcome="Completed">
+    <Counters total="4" executed="4" passed="4" failed="0" error="0" timeout="0" aborted="0" inconclusive="0" passedButRunAborted="0" notRunnable="0" notExecuted="0" disconnected="0" warning="0" completed="0" inProgress="0" pending="0" />
+    <Output>
+      <StdOut>NUnit Adapter 4.6.0.0: Test execution started&#xD;
+Running all tests in C:\Users\Owner\Desktop\AstraOrganized2\astra-remaining-improvements\stage\b8fb41bd6255\scripts\template-order-tests\bin\Debug\net10.0\TemplateOrder.Tests.dll&#xD;
+   NUnit3TestExecutor discovered 4 of 4 NUnit test cases using Current Discovery mode, Non-Explicit run&#xD;
+NUnit Adapter 4.6.0.0: Test execution complete&#xD;
+</StdOut>
+    </Output>
+  </ResultSummary>
+</TestRun>
