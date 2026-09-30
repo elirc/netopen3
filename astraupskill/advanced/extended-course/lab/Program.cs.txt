@@ -1,0 +1,41 @@
+using System.Collections;
+
+var a = Guid.Parse("00000000-0000-0000-0000-000000000001");
+var b = Guid.Parse("00000000-0000-0000-0000-000000000002");
+var x = Guid.Parse("00000000-0000-0000-0000-000000000003");
+var missing = Guid.Parse("00000000-0000-0000-0000-000000000004");
+var first = new Entity(a, "first");
+var later = new Entity(a, "later");
+var other = new Entity(b, "other");
+int passed = 0, failed = 0;
+Check("requested order", () => Equal(Harness.Select(new[] { first, other }, new[] { b, a }), other, first));
+Check("missing and extras omitted", () => Equal(Harness.Select(new[] { new Entity(x, "extra"), other, first }, new[] { a, missing, b }), first, other));
+Check("duplicate requests emitted once", () => Equal(Harness.Select(new[] { first, other }, new[] { b, a, b, a }), other, first));
+Check("first hydrated payload reference wins", () => Equal(Harness.Select(new[] { first, later }, new[] { a }), first));
+Check("hydrated sequence enumerated once", () => {
+    var input = new OneShot(new[] { first, other });
+    Equal(Harness.Select(input, new[] { b, a }), other, first);
+    if (input.Enumerations != 1) throw new Exception("Unexpected enumeration count");
+});
+Check("empty request produces empty selection", () => Equal(Harness.Select(new[] { first }, Array.Empty<Guid>())));
+Console.WriteLine($"{passed} passed; {failed} failed");
+return failed == 0 ? 0 : 1;
+
+void Check(string name, Action action) {
+    try { action(); passed++; Console.WriteLine("PASS " + name); }
+    catch (Exception error) { failed++; Console.WriteLine("FAIL " + name + ": " + error.Message); }
+}
+static void Equal(IReadOnlyList<Entity> actual, params Entity[] expected) {
+    if (actual.Count != expected.Length) throw new Exception($"Expected {expected.Length} items; got {actual.Count}");
+    for (var i = 0; i < expected.Length; i++)
+        if (!ReferenceEquals(actual[i], expected[i])) throw new Exception("Wrong payload reference at " + i);
+}
+sealed record Entity(Guid Key, string Marker) : IEntity;
+sealed class OneShot(Entity[] items) : IEnumerable<Entity> {
+    public int Enumerations { get; private set; }
+    public IEnumerator<Entity> GetEnumerator() {
+        if (++Enumerations != 1) throw new Exception("Second enumeration");
+        return ((IEnumerable<Entity>)items).GetEnumerator();
+    }
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+}
