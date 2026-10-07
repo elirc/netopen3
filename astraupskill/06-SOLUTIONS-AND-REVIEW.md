@@ -6,9 +6,21 @@ The duplicate example yields B-first followed by A-first. TryAdd preserves each 
 
 The empty page retains Total seventeen and calls neither hydration nor mapping. Total describes the search result, not simply the count of hydrated page items. Missing entities can reduce the returned page without authorizing this helper to rewrite that metadata.
 
-Reversing hydration with duplicate payloads can change the selected alias because the policy explicitly retains the first hydrated entity. The tests document that choice rather than claiming a canonical payload across contradictory service responses. Average dictionary operations give linear passes at the cost of a lookup proportional to hydrated distinct keys.
+Reversing hydration with duplicate payloads can change the selected alias because the policy explicitly retains the first hydrated entity. The tests document that choice rather than claiming a canonical payload across contradictory service responses. In numbers, with *h* hydrated and *r* requested items: the old helper calls `Array.IndexOf` (O(r)) once per hydrated entity inside a sort, so roughly O(h·r + h log h). The new one builds the dictionary in O(h) and walks the requested ids in O(r), which is O(h + r) on average, plus O(h) extra memory for the dictionary.
 
-During review, check extras, missing keys, requested duplicates, hydrated duplicates, order, and total independently. Also check shared-helper callers for compatibility. These unit results do not establish production authorization or synchronization between an index and persistent storage.
+## Break-it answers (derived by reading the tests, 2026-10-06)
+
+| Edit in a disposable copy | Fails | Still passes |
+|---|---|---|
+| Restore the old `OrderBy(Array.IndexOf)` one-liner | the id assertion in `…Excludes_Unrequested_And_Missing…` (actual `extra, A, B`); the id **and** alias assertions in `…Collapses_Duplicate_Keys…` (actual 4 items) | the scrambled-order test (no extras or duplicates), the empty-page test (the helper is never reached) |
+| `TryAdd` → indexer assignment | only the alias assertion in `…Collapses_Duplicate_Keys…` (actual `b-later, a-later`) | the id assertions, because `Remove` still emits each key once |
+| Delete the empty-page `return` | `_templateService.Verify(… Times.Never)` in the empty-page test | `Items` is empty and `Total` is 17 either way, so only the call-count assertion detects the missing short circuit |
+
+The last row is the useful lesson. The short circuit is an optimisation, and only a call-count assertion can see it.
+
+## Review checklist
+
+During review, check extras, missing keys, requested duplicates, hydrated duplicates, order and total independently. Then check the shared helper's other callers. [03](03-WORKED-CHANGE.md#before-and-after) lists ten: four other search controllers that keep only a single ordering test each, and five batch controllers covered only by integration tests that this change's acceptance run did not execute. A senior reviewer would ask for either one shared helper test that covers the mismatched sets once for all callers (the helper is `protected static`, so it needs a small derived test class), or an explicit statement that the batch endpoints were not re-verified. These unit results do not establish production authorization or synchronization between an index and persistent storage.
 
 ## Source excerpt
 

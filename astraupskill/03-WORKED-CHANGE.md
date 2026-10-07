@@ -8,34 +8,19 @@ The template controller continues to call the shared helper before mapping. Its 
 
 Review the algorithm with concrete sequences rather than only a normal sorted example. Requested A, missing, B with hydrated B, extra, A must yield A, B. Requested B, A, B with duplicate hydrated payloads must yield one B and one A using the first payload for each. The ordinary scrambled-order regression remains valuable, but those mismatched-set examples are what distinguish the repair from a simple sort refactor.
 
-## Source excerpt
+## Before and after
 
-From [Umbraco-CMS/src/Umbraco.Cms.Api.Management/Controllers/ManagementApiControllerBase.cs](../Umbraco-CMS/src/Umbraco.Cms.Api.Management/Controllers/ManagementApiControllerBase.cs).
+The new helper is printed in full in [02-CONCEPTS](02-CONCEPTS.md#source-excerpt) and lives at `Umbraco-CMS/src/Umbraco.Cms.Api.Management/Controllers/ManagementApiControllerBase.cs:90-110`. The line it replaced is preserved in [the snapshot](snapshots/Umbraco-CMS__src__Umbraco.Cms.Api.Management__Controllers__ManagementApiControllerBase.cs.original.txt) at lines 90-92:
 
 ```cs
     protected static List<TEntity> OrderByRequestedIds<TEntity>(IEnumerable<TEntity> entities, Guid[] requestedIds)
         where TEntity : IEntity
-    {
-        var entitiesById = new Dictionary<Guid, TEntity>();
-        foreach (TEntity entity in entities)
-        {
-            // The first hydrated entity wins if a service returns duplicates.
-            entitiesById.TryAdd(entity.Key, entity);
-        }
-
-        var ordered = new List<TEntity>();
-        foreach (Guid requestedId in requestedIds)
-        {
-            if (entitiesById.Remove(requestedId, out TEntity? entity))
-            {
-                ordered.Add(entity);
-            }
-        }
-
-        return ordered;
-    }
-}
+        => entities.OrderBy(e => Array.IndexOf(requestedIds, e.Key)).ToList();
 ```
+
+Work the two mismatched examples through this one-liner by hand. `OrderBy` is a stable sort, so ties keep hydration order. For requested A, missing, B with hydrated B, extra, A the result is extra, A, B. For requested B, A, B, A with hydrated A-first, B-first, B-later, A-later it is B-first, B-later, A-first, A-later: four items where the contract wants two.
+
+**Blast radius.** The helper sits in the shared base class, so this change reaches every caller, not only templates. A scoped search (`git grep -n "OrderByRequestedIds(" -- Umbraco-CMS/src/Umbraco.Cms.Api.Management`) finds ten call sites. Five are search-item controllers (`DataType`, `Element`, `MediaType`, `MemberType`, `Template`). Five are batch controllers (`BatchDataTypes`, `BatchDocumentTypes`, `BatchMediaTypes`, `BatchMemberTypes`, `BatchUsers`). Only the template controller received the new mismatched-set tests. The other four search controllers keep one ordering test each. The batch controllers are exercised only by `Umbraco.Tests.Integration/ManagementApi/*/Batch*ControllerTests.cs`, which the focused acceptance run did not execute.
 
 ## Course navigation
 

@@ -1,82 +1,36 @@
 # Work through mismatched result sets
 
-Exercise one: requested identifiers are A, missing, B, while hydrated entities arrive as B, extra, A. Predict the old Array.IndexOf sort order and the corrected result. Explain why assigning a high sort index to extras would still fail the requirement to exclude them.
+Write each prediction down before checking it. The checks use the focused test project from [VERIFICATION](VERIFICATION.md): `dotnet test scripts/template-order-tests/TemplateOrder.Tests.csproj /p:UmbracoBuild=true`, run from the repository root (about four minutes on the recorded run, almost all of it building the Management API). Make every source edit in a disposable branch and restore it with `git checkout -- Umbraco-CMS`.
 
-Exercise two: request B, A, B, A. Hydration returns A-first, B-first, B-later, A-later. Predict both identifiers and aliases in the response. Identify which dictionary operation chooses the first payload and which operation prevents repeated output.
+## Exercise 1 - Extras and missing keys
 
-Exercise three: return an empty search page with Total seventeen. Predict the response Total and the number of hydration and mapper calls. Explain why replacing Total with Items.Count would change pagination meaning.
+**Goal.** Requested identifiers are A, missing, B. Hydrated entities arrive as B, extra, A. Predict the old `Array.IndexOf` sort order and the corrected result. Explain why giving extras a *high* sort index would still fail the requirement to exclude them.
 
-Exercise four: keep the requested sequence fixed but reverse hydration order for distinct identifiers. Predict whether the response order changes. Then repeat with duplicate payloads and explain why reversing hydration can change the selected alias under the explicit first-payload policy.
+**Check.** The corrected result is asserted by `Search_Template_Item_Excludes_Unrequested_And_Missing_Entities_Without_Changing_Total`. To check your "old" prediction, paste the one-liner from [03](03-WORKED-CHANGE.md#before-and-after) over the helper body and run the focused project. The assertion message prints the actual sequence of ids, so compare it with what you wrote.
 
-Exercise five: consider a large batch. Compare repeated Array.IndexOf lookups with one dictionary construction and one requested-ID pass. State the average complexity assumption and the memory tradeoff. Keep performance reasoning separate from claims about authorization or search-index consistency, which this helper does not establish.
+## Exercise 2 - Duplicates on both sides
 
-## Source excerpt
+**Goal.** Request B, A, B, A. Hydration returns A-first, B-first, B-later, A-later. Predict both the identifiers and the aliases in the response. Name the dictionary operation that chooses the first payload and the one that prevents repeated output.
 
-From [Umbraco-CMS/tests/Umbraco.Tests.UnitTests/Umbraco.Cms.Api.Management/Controllers/Template/Item/SearchTemplateItemControllerTests.cs](../Umbraco-CMS/tests/Umbraco.Tests.UnitTests/Umbraco.Cms.Api.Management/Controllers/Template/Item/SearchTemplateItemControllerTests.cs).
+**Check.** `Search_Template_Item_Collapses_Duplicate_Keys_And_Keeps_First_Hydrated_Entity` asserts the ids, the aliases and `Total` 4. Change `TryAdd` to the indexer (`entitiesById[entity.Key] = entity;`) and predict which of its three assertions fail before you run it.
 
-```cs
-    public async Task Search_Template_Item_Collapses_Duplicate_Keys_And_Keeps_First_Hydrated_Entity()
-    {
-        var keyA = Guid.NewGuid();
-        var keyB = Guid.NewGuid();
-        SetSearchResult([keyB, keyA, keyB, keyA], 4);
-        _templateService.Setup(x => x.GetAllAsync(It.IsAny<Guid[]>())).ReturnsAsync(
-            new[] { Template(keyA, "a-first"), Template(keyB, "b-first"), Template(keyB, "b-later"), Template(keyA, "a-later") });
+## Exercise 3 - The empty page
 
-        PagedModel<TemplateItemResponseModel> result = await SearchResult();
+**Goal.** Return an empty search page with `Total` 17. Predict the response `Total` and the number of hydration and mapper calls. Explain why replacing `Total` with `Items.Count` would change what pagination means.
 
-        Assert.Multiple(() =>
-        {
-            Assert.That(result.Items.Select(x => x.Id), Is.EqualTo(new[] { keyB, keyA }));
-            Assert.That(result.Items.Select(x => x.Alias), Is.EqualTo(new[] { "b-first", "a-first" }));
-            Assert.That(result.Total, Is.EqualTo(4));
-        });
-    }
+**Check.** `Search_Template_Item_Empty_Page_Preserves_Total_Without_Hydration_Or_Mapping` asserts both, using `Times.Never` on `GetAllAsync` and `MapEnumerable`. Delete the early `return` in `SearchTemplateItemController.cs` (the `if (searchResult.Items.Any() is false)` block starting at line 51) and predict which `Verify` fails first.
 
-    [Test]
-    public async Task Search_Template_Item_Empty_Page_Preserves_Total_Without_Hydration_Or_Mapping()
-    {
-        SetSearchResult([], 17);
+## Exercise 4 - Hydration order is not authority
 
-        PagedModel<TemplateItemResponseModel> result = await SearchResult();
+**Goal.** Keep the requested sequence fixed and reverse the hydration order for distinct identifiers. Predict whether the response order changes. Then repeat with duplicate payloads and explain why reversing hydration *can* change the selected alias under the first-payload policy.
 
-        Assert.Multiple(() =>
-        {
-            Assert.That(result.Items, Is.Empty);
-            Assert.That(result.Total, Is.EqualTo(17));
-        });
-        _templateService.Verify(x => x.GetAllAsync(It.IsAny<Guid[]>()), Times.Never);
-        _mapper.Verify(x => x.MapEnumerable<ITemplate, TemplateItemResponseModel>(It.IsAny<IEnumerable<ITemplate>>()), Times.Never);
-    }
+**Check.** No existing test reverses hydration order for duplicates. Write the case: copy the duplicate test, reverse the hydrated array, and assert the aliases you predicted (`b-later`, `a-later`). This is a characterization test. It documents the policy rather than proving the policy is right.
 
-    private void SetSearchResult(Guid[] keys, long total)
-    {
-        _entitySearchService
-            .Setup(x => x.Search(UmbracoObjectTypes.Template, It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int>()))
-            .Returns(new PagedModel<IEntitySlim>
-            {
-                Items = keys.Select(key => (IEntitySlim)new EntitySlim { Key = key }).ToArray(),
-                Total = total,
-            });
-        _mapper
-            .Setup(x => x.MapEnumerable<ITemplate, TemplateItemResponseModel>(It.IsAny<IEnumerable<ITemplate>>()))
-            .Returns<IEnumerable<ITemplate>>(entities =>
-                entities.Select(entity => new TemplateItemResponseModel { Alias = entity.Alias, Id = entity.Key }).ToList());
-    }
+## Exercise 5 - Cost
 
-    private static ITemplate Template(Guid key, string alias) =>
-        Mock.Of<ITemplate>(template => template.Key == key && template.Alias == alias);
+**Goal.** For a large batch, compare repeated `Array.IndexOf` lookups with one dictionary build and one pass over the requested ids. State the average-case complexity assumption and the memory tradeoff. Keep performance reasoning separate from claims about authorization or search-index consistency, which this helper does not establish.
 
-    private async Task<PagedModel<TemplateItemResponseModel>> SearchResult()
-    {
-        IActionResult result = await _controller.Search(CancellationToken.None, "test");
-        Assert.That(result, Is.TypeOf<OkObjectResult>());
-        var value = ((OkObjectResult)result).Value;
-        Assert.That(value, Is.TypeOf<PagedModel<TemplateItemResponseModel>>());
-        return (PagedModel<TemplateItemResponseModel>)value!;
-    }
-}
-```
+**Check.** Write the answer as two big-O expressions in terms of *h* hydrated and *r* requested items, then compare with [06](06-SOLUTIONS-AND-REVIEW.md). Do not run a benchmark from a unit-test project and call it evidence.
 
 ## Course navigation
 

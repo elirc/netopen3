@@ -1,6 +1,6 @@
 # Use the focused controller suite as the boundary
 
-The acceptance command uses [TemplateOrder.Tests.csproj](../scripts/template-order-tests/TemplateOrder.Tests.csproj). This focused project links the actual SearchTemplateItemControllerTests source from the upstream unit-test directory and references the real Management API project. It does not copy or reimplement the controller or helper. Run `dotnet test scripts/template-order-tests/TemplateOrder.Tests.csproj /p:UmbracoBuild=true` from the project root in a normal checkout. Exact staging arguments, exit status, and TRX results are appended below after successful execution. Building referenced projects does not imply every upstream test or integration environment was exercised.
+The acceptance command uses [TemplateOrder.Tests.csproj](../scripts/template-order-tests/TemplateOrder.Tests.csproj). This focused project links the actual SearchTemplateItemControllerTests source from the upstream unit-test directory and references the real Management API project. It does not copy or reimplement the controller or helper. Run `dotnet test scripts/template-order-tests/TemplateOrder.Tests.csproj /p:UmbracoBuild=true` from the repository root. The project targets `net10.0`. The recorded run (2026-09-20, exit 0, about four minutes) also passed `/p:GitVersionBaseDirectory=<your path>/Umbraco-CMS` and `/p:GitRepoRoot=<your path>/Umbraco-CMS` so that Umbraco's version task could find a Git root. If your build stops in that task, add the same two properties with your own absolute path. Building referenced projects does not imply every upstream test or integration environment was exercised.
 
 The four focused cases include the existing scrambled-order example and three new regressions for missing and extra hydration, duplicate identifiers with first-payload selection, and empty-page short-circuit behavior. Assertions preserve search Total independently of the number of returned entities and verify skipped service calls for an empty page.
 
@@ -48,6 +48,6 @@ The accepted test evidence covers **4 distinct passing tests**. The commands bel
 
 | Check | Recorded command | Exit | Evidence |
 |---|---|---:|---|
-| `astra-netopen3-template-tests-r7` | `["dotnet", "test", "scripts/template-order-tests/TemplateOrder.Tests.csproj", "--nologo", "--verbosity", "minimal", "/m:1", "/p:UmbracoBuild=true", "/p:GitVersionBaseDirectory=C:/Users/Owner/Desktop/netopen3/Umbraco-CMS", "/p:GitRepoRoot=C:/Users/Owner/Desktop/netopen3/Umbraco-CMS", "--logger", "trx"]` | 0 | [record](evidence/astra-netopen3-template-tests-r7.json), [log](evidence/astra-netopen3-template-tests-r7.log) |
+| `astra-netopen3-template-tests-r7` | `dotnet test scripts/template-order-tests/TemplateOrder.Tests.csproj --nologo --verbosity minimal /m:1 /p:UmbracoBuild=true /p:GitVersionBaseDirectory=<workstation path>/Umbraco-CMS /p:GitRepoRoot=<workstation path>/Umbraco-CMS --logger trx` | 0 | [record](evidence/astra-netopen3-template-tests-r7.json); the console log it names was not committed |
 
-[Machine-readable results 1](evidence/regression.trx).
+[Machine-readable results](evidence/regression.trx): `<Counters total="4" executed="4" passed="4" failed="0" …>`, with the four `Search_Template_Item_*` test names.

@@ -6,7 +6,7 @@ Now iterate requested keys B, missing, A, B. Remove B and append B-first. Missin
 
 Pass those entities through the fixture mapper and inspect identifiers and aliases in the response. Copy Total from the search page without substituting the output length. This separates entity selection from pagination metadata and makes every operation in the algorithm observable in the controller regression.
 
-Repeat the trace with an empty requested page. The controller returns before building keys or hydrating templates, so the helper is not invoked. Verify the mapper spy remains unused as well. Finally, replace the helper with the original sort in a disposable copy and identify which extra and duplicate assertions fail. Restore the reviewed implementation before running acceptance or packaging.
+Repeat the trace with an empty requested page. The controller returns before building keys or hydrating templates, so the helper is not invoked. Verify the mapper spy remains unused as well. Finally, replace the helper with the original sort (the one-liner in [03](03-WORKED-CHANGE.md#before-and-after)) in a disposable copy. Trace this lab's own inputs through it first. Hydrated A-first, B-first, B-later, A-later, extra against requested B, missing, A, B gives indices 2, 0, 0, 2, -1, so the stable sort emits extra, B-first, B-later, A-first, A-later. Then run the focused project and confirm that exactly the extra/missing and duplicate tests fail ([06](06-SOLUTIONS-AND-REVIEW.md#break-it-answers-derived-by-reading-the-tests-2026-10-06) lists the assertions). Restore the reviewed implementation with `git checkout -- Umbraco-CMS` before running acceptance.
 
 ## Source excerpt
 
